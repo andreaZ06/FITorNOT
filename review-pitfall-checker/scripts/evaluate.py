@@ -52,6 +52,32 @@ def build_confusion_matrix(
     return matrix
 
 
+def format_reviews_for_workflow(reviews: list[dict[str, Any]]) -> str:
+    """把结构化评论转成传给 Dify 的文本。"""
+
+    return "\n".join(
+        f"{item['review_id']}: {item['text']} "
+        f"(rating={item['rating']}, useful_count={item['useful_count']})"
+        for item in reviews
+    )
+
+
+def extract_predictions(outputs: dict[str, Any]) -> list[dict[str, Any]]:
+    """从 Dify outputs 中提取预测列表。"""
+
+    raw_results = (
+        outputs.get("results")
+        or outputs.get("analysis_results")
+        or outputs.get("items")
+        or []
+    )
+    if isinstance(raw_results, dict):
+        raw_results = [raw_results]
+    if not isinstance(raw_results, list):
+        return []
+    return [item for item in raw_results if isinstance(item, dict)]
+
+
 def calculate_accuracy_by_level(
     labels: dict[str, str], predictions: list[dict[str, Any]]
 ) -> dict[str, float]:
@@ -99,7 +125,12 @@ def evaluate(
 
     reviews = clean_reviews_from_csv(reviews_csv)
     labels = load_labels(labels_csv)
-    predictions = run_dify_workflow(reviews, user_scenario, product_id)
+    outputs = run_dify_workflow(
+        format_reviews_for_workflow(reviews),
+        user_scenario=user_scenario,
+        user_id=product_id or "evaluate",
+    )
+    predictions = extract_predictions(outputs)
 
     accuracy = calculate_accuracy_by_level(labels, predictions)
     matrix = build_confusion_matrix(labels, predictions)

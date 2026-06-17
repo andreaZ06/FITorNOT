@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,31 @@ def normalize_text(text: str) -> str:
     """压缩首尾空白，避免同一条评论因为复制空格造成误判。"""
 
     return (text or "").strip()
+
+
+def has_meaningful_text(line: str) -> bool:
+    """判断一行是否包含字母、数字或中文等可分析文本。"""
+
+    return any(
+        unicodedata.category(char).startswith(("L", "N")) for char in line.strip()
+    )
+
+
+def lightweight_clean_reviews_text(reviews_text: str) -> str:
+    """轻量程序化预处理评论文本。
+
+    这里只做格式级清理：去掉空白行和纯表情/符号行。
+    不做语义判断，不过滤“好评返现”等内容，这些交给 Dify 内部节点处理。
+    """
+
+    lines: list[str] = []
+    for raw_line in (reviews_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or not has_meaningful_text(line):
+            continue
+        lines.append(line)
+
+    return "\n".join(lines)
 
 
 def is_noise_review(text: str) -> bool:

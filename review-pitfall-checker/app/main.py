@@ -2,59 +2,45 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.config import APP_NAME
 from scripts.call_dify_workflow import DifyWorkflowError, run_dify_workflow
-from scripts.clean_reviews import clean_review_rows
+from scripts.clean_reviews import lightweight_clean_reviews_text
 
 
 app = FastAPI(title=APP_NAME, version="0.1.0")
 
 
-class ReviewInput(BaseModel):
-    review_id: str
-    text: str
-    rating: int | None = None
-    useful_count: int | None = None
-
-
 class AnalyzeRequest(BaseModel):
-    product_id: str = Field(default="", description="商品 ID")
-    reviews: list[ReviewInput]
-    user_scenario: str = Field(..., description="用户使用场景，例如老人用、通勤用")
+    product_id: str
+    reviews: str
+    user_scenario: Optional[str] = None
 
 
 @app.post("/analyze")
 def analyze(request: AnalyzeRequest) -> dict[str, Any]:
-    """串起清洗 + Dify Workflow 分析，返回避坑结论 JSON。"""
+    """分析一段已整理好的评论文本，并把 Dify outputs 原样返回。"""
 
-    cleaned_reviews = clean_review_rows([review.model_dump() for review in request.reviews])
-    if not cleaned_reviews:
-        return {
-            "product_id": request.product_id,
-            "user_scenario": request.user_scenario,
-            "cleaned_count": 0,
-            "results": [],
-            "summary": "没有可用于分析的有效评论。",
-        }
+    reviews_text = lightweight_clean_reviews_text(request.reviews)
+    if not reviews_text:
+        raise HTTPException(status_code=400, detail="reviews 不能为空")
 
     try:
-        results = run_dify_workflow(
-            cleaned_reviews,
-            user_scenario=request.user_scenario,
-            product_id=request.product_id,
+        return run_dify_workflow(
+            reviews_text=reviews_text,
+            user_scenario=request.user_scenario or "",
+            user_id=request.product_id or "test-user",
         )
     except DifyWorkflowError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    return {
-        "product_id": request.product_id,
-        "user_scenario": request.user_scenario,
-        "cleaned_count": len(cleaned_reviews),
-        "results": results,
-        "summary": "已完成负评风险分级与用户场景适配分析。",
-    }
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": str(exc),
+                "dify_status_code": exc.status_code,
+                "dify_response_body": exc.response_body,
+            },
+        ) from exc
