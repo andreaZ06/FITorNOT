@@ -15,8 +15,11 @@ class UiPageTest(unittest.TestCase):
 
         self.assertIn("FITorNOT", html)
         self.assertIn("HELLO", html)
+        self.assertIn("font-family: Arial, sans-serif", html)
         self.assertIn("立即分析", html)
         self.assertIn("最近查询", html)
+        self.assertIn("结论", html)
+        self.assertIn("根据你最近的使用场景，推荐适合你的商品~", html)
         self.assertIn('id="product-id"', html)
         self.assertIn('id="user-scenario"', html)
         self.assertIn('id="reviews"', html)

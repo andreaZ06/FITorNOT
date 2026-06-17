@@ -43,7 +43,7 @@ def render_index_page() -> str:
     body {
       margin: 0;
       min-height: 100dvh;
-      font-family: Inter, "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+      font-family: Arial, sans-serif;
       color: var(--text);
       background:
         radial-gradient(circle at 92% 12%, rgb(254 215 210 / 0.82), transparent 28rem),
@@ -542,7 +542,7 @@ def render_index_page() -> str:
 
         <section class="result-card" aria-labelledby="result-title">
           <div class="result-head">
-            <h2 id="result-title">避坑结论</h2>
+            <h2 id="result-title">结论</h2>
             <span id="result-status">等待输入</span>
           </div>
           <div class="result-body">
@@ -563,7 +563,7 @@ def render_index_page() -> str:
       <aside class="side-column">
         <section class="side-card">
           <h3>每周推荐</h3>
-          <p>根据你最近的使用场景，优先复盘高风险品类，把“看起来不错但不适合你”的商品提前拦下来。</p>
+          <p>根据你最近的使用场景，推荐适合你的商品~</p>
           <div class="progress" aria-hidden="true">
             <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
           </div>
