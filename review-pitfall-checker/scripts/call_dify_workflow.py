@@ -1,15 +1,15 @@
 """FITorNOT 调用 Dify Workflow 的边界模块。
 
-本模块只负责：
-- 从环境变量或 .env 读取 Dify 配置。
-- 组装 Workflow 请求。
-- 处理超时、重试、HTTP 错误和响应解析。
+本模块负责读取 Dify 配置、发送 Workflow 请求、解析 streaming SSE 事件，
+并把最终 workflow_finished 事件里的 data.outputs 返回给业务层。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from collections import deque
 from typing import Any
 
 import requests
@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 
 DEFAULT_DIFY_BASE_URL = "https://api.dify.ai/v1"
+RECENT_EVENT_LIMIT = 5
 
 
 class DifyWorkflowError(RuntimeError):
@@ -51,22 +52,85 @@ def get_dify_config() -> tuple[str, str]:
     return api_key, base_url or DEFAULT_DIFY_BASE_URL
 
 
-def parse_outputs(response_json: dict[str, Any]) -> dict[str, Any]:
-    """只返回 Dify 响应里的 data.outputs。"""
+def format_recent_events(events: deque[dict[str, Any]]) -> str:
+    """把最近收到的 SSE 事件格式化到错误信息里，便于排查。"""
+
+    return json.dumps(list(events), ensure_ascii=False)
+
+
+def parse_sse_json_line(line: str | bytes) -> dict[str, Any] | None:
+    """解析一行 Dify SSE 数据。
+
+    Dify SSE 行格式通常是：data: {...json...}
+    空行、非 data 行和 [DONE] 行会被忽略。
+    """
+
+    if isinstance(line, bytes):
+        line = line.decode("utf-8")
+
+    line = line.strip()
+    if not line or not line.startswith("data:"):
+        return None
+
+    payload = line.removeprefix("data:").strip()
+    if not payload or payload == "[DONE]":
+        return None
 
     try:
-        outputs = response_json["data"]["outputs"]
-    except (KeyError, TypeError) as exc:
+        event = json.loads(payload)
+    except json.JSONDecodeError as exc:
         raise DifyWorkflowError(
-            "Dify 响应缺少 data.outputs", response_body=str(response_json)
+            "Dify SSE 行不是合法 JSON", response_body=payload
         ) from exc
 
-    if not isinstance(outputs, dict):
-        raise DifyWorkflowError(
-            "Dify data.outputs 不是对象", response_body=str(response_json)
-        )
+    if not isinstance(event, dict):
+        return None
 
-    return outputs
+    return event
+
+
+def extract_workflow_outputs_from_stream(response: requests.Response) -> dict[str, Any]:
+    """逐行消费 SSE 流，并返回 workflow_finished 事件里的 outputs。"""
+
+    recent_events: deque[dict[str, Any]] = deque(maxlen=RECENT_EVENT_LIMIT)
+
+    try:
+        lines = response.iter_lines(decode_unicode=True)
+        for line in lines:
+            event = parse_sse_json_line(line)
+            if event is None:
+                continue
+
+            recent_events.append(event)
+            event_name = event.get("event")
+
+            if event_name == "workflow_finished":
+                outputs = (event.get("data") or {}).get("outputs")
+                if isinstance(outputs, dict):
+                    return outputs
+                raise DifyWorkflowError(
+                    "workflow_finished 事件缺少 data.outputs",
+                    response_body=format_recent_events(recent_events),
+                )
+
+            if event_name == "error":
+                message = event.get("message") or (event.get("data") or {}).get(
+                    "message"
+                )
+                raise DifyWorkflowError(
+                    f"Dify Workflow streaming error: {message or 'unknown error'}",
+                    response_body=format_recent_events(recent_events),
+                )
+    except requests.RequestException as exc:
+        raise DifyWorkflowError(
+            f"Dify SSE 流读取异常: {exc}",
+            response_body=format_recent_events(recent_events),
+        ) from exc
+
+    raise DifyWorkflowError(
+        "Dify SSE 流结束但没有收到 workflow_finished 事件",
+        response_body=format_recent_events(recent_events),
+    )
 
 
 def run_dify_workflow(
@@ -74,9 +138,10 @@ def run_dify_workflow(
     user_scenario: str = "",
     user_id: str = "test-user",
 ) -> dict[str, Any]:
-    """运行 Dify Workflow 并返回 outputs。
+    """运行 Dify Workflow streaming 模式并返回最终 outputs。
 
-    失败时最多重试 2 次，总共 3 次请求；每次失败后间隔 2 秒。
+    只对连接层面的 requests.post 失败做重试，避免业务超时或已启动的
+    Workflow 被重复提交。
     """
 
     api_key, base_url = get_dify_config()
@@ -90,30 +155,33 @@ def run_dify_workflow(
             "reviews": reviews_text,
             "user_scenario": user_scenario or "",
         },
-        "response_mode": "blocking",
+        "response_mode": "streaming",
         "user": user_id,
     }
 
     last_error: DifyWorkflowError | None = None
     for attempt in range(3):
         try:
-            response = requests.post(url, headers=headers, json=body, timeout=90)
+            response = requests.post(
+                url,
+                headers=headers,
+                json=body,
+                timeout=180,
+                stream=True,
+            )
+            break
         except requests.RequestException as exc:
-            last_error = DifyWorkflowError(f"Dify 请求异常: {exc}")
-        else:
-            if not 200 <= response.status_code < 300:
-                last_error = DifyWorkflowError(
-                    "Dify Workflow 返回非成功状态",
-                    status_code=response.status_code,
-                    response_body=response.text,
-                )
-            else:
-                try:
-                    return parse_outputs(response.json())
-                except ValueError as exc:
-                    last_error = DifyWorkflowError(f"Dify 响应不是合法 JSON: {exc}")
+            last_error = DifyWorkflowError(f"Dify 连接异常: {exc}")
+            if attempt < 2:
+                time.sleep(2)
+    else:
+        raise last_error or DifyWorkflowError("Dify Workflow 连接失败")
 
-        if attempt < 2:
-            time.sleep(2)
+    if not 200 <= response.status_code < 300:
+        raise DifyWorkflowError(
+            "Dify Workflow 返回非成功状态",
+            status_code=response.status_code,
+            response_body=response.text,
+        )
 
-    raise last_error or DifyWorkflowError("Dify Workflow 调用失败")
+    return extract_workflow_outputs_from_stream(response)
