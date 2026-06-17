@@ -27,6 +27,17 @@ class FakeFastAPI:
 
         return decorator
 
+    def get(self, path, response_class=None):
+        def decorator(func):
+            return func
+
+        return decorator
+
+
+class FakeHTMLResponse:
+    def __init__(self, content):
+        self.content = content
+
 
 class FakeBaseModel:
     def __init__(self, **kwargs):
@@ -37,6 +48,7 @@ class FakeBaseModel:
 class MainAnalyzeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.old_fastapi = sys.modules.get("fastapi")
+        self.old_fastapi_responses = sys.modules.get("fastapi.responses")
         self.old_pydantic = sys.modules.get("pydantic")
         self.old_dify = sys.modules.get("scripts.call_dify_workflow")
         self.calls = []
@@ -44,6 +56,8 @@ class MainAnalyzeTest(unittest.TestCase):
         fastapi_module = types.ModuleType("fastapi")
         fastapi_module.FastAPI = FakeFastAPI
         fastapi_module.HTTPException = FakeHTTPException
+        fastapi_responses_module = types.ModuleType("fastapi.responses")
+        fastapi_responses_module.HTMLResponse = FakeHTMLResponse
         pydantic_module = types.ModuleType("pydantic")
         pydantic_module.BaseModel = FakeBaseModel
 
@@ -63,6 +77,7 @@ class MainAnalyzeTest(unittest.TestCase):
         dify_module.run_dify_workflow = run_dify_workflow
 
         sys.modules["fastapi"] = fastapi_module
+        sys.modules["fastapi.responses"] = fastapi_responses_module
         sys.modules["pydantic"] = pydantic_module
         sys.modules["scripts.call_dify_workflow"] = dify_module
         sys.modules.pop("app.main", None)
@@ -70,6 +85,7 @@ class MainAnalyzeTest(unittest.TestCase):
     def tearDown(self) -> None:
         for name, old_module in (
             ("fastapi", self.old_fastapi),
+            ("fastapi.responses", self.old_fastapi_responses),
             ("pydantic", self.old_pydantic),
             ("scripts.call_dify_workflow", self.old_dify),
         ):

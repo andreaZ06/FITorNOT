@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.config import APP_NAME
+from app.ui import render_index_page
 from scripts.call_dify_workflow import DifyWorkflowError, run_dify_workflow
 from scripts.clean_reviews import lightweight_clean_reviews_text
 
@@ -19,6 +21,13 @@ class AnalyzeRequest(BaseModel):
     product_id: str
     reviews: str
     user_scenario: Optional[str] = None
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> HTMLResponse:
+    """返回 FITorNOT 单页分析界面。"""
+
+    return HTMLResponse(render_index_page())
 
 
 @app.post("/analyze")
