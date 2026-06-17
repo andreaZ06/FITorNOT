@@ -1,1 +1,1 @@
-"""避坑评价分析工具 FastAPI 应用包。"""
+"""FITorNOT FastAPI 应用包。"""

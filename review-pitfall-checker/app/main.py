@@ -1,4 +1,4 @@
-"""避坑评价分析工具 FastAPI 服务。"""
+"""FITorNOT FastAPI 服务。"""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from app.config import APP_NAME
 from scripts.call_dify_workflow import DifyWorkflowError, run_dify_workflow
 from scripts.clean_reviews import clean_review_rows
 
 
-app = FastAPI(title="避坑评价分析工具", version="0.1.0")
+app = FastAPI(title=APP_NAME, version="0.1.0")
 
 
 class ReviewInput(BaseModel):
