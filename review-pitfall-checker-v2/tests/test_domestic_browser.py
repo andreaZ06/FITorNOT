@@ -24,6 +24,31 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
         )
         self.assertTrue(config["sync_system_profile"])
 
+    def test_build_browser_session_config_reads_cdp_url_from_profile_marker(self):
+        module = importlib.import_module("domestic_browser")
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            marker = Path(profile_dir) / "cdp-url.txt"
+            marker.write_text("http://127.0.0.1:9333", encoding="utf-8")
+
+            with patch.dict(os.environ, {"FITORNOT_BROWSER_CDP_URL": ""}, clear=False):
+                config = module.build_browser_session_config(profile_dir)
+
+        self.assertEqual(config["mode"], "cdp")
+        self.assertEqual(config["cdp_url"], "http://127.0.0.1:9333")
+
+    def test_build_browser_session_config_strips_utf8_bom_from_cdp_marker(self):
+        module = importlib.import_module("domestic_browser")
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            marker = Path(profile_dir) / "cdp-url.txt"
+            marker.write_text("\ufeffhttp://127.0.0.1:9222", encoding="utf-8")
+
+            with patch.dict(os.environ, {"FITORNOT_BROWSER_CDP_URL": ""}, clear=False):
+                config = module.build_browser_session_config(profile_dir)
+
+        self.assertEqual(config["cdp_url"], "http://127.0.0.1:9222")
+
     def test_build_browser_session_config_prefers_cdp_when_configured(self):
         module = importlib.import_module("domestic_browser")
 
@@ -114,6 +139,31 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
         self.assertEqual(candidates[0]["title"], "Anker Nano 10000mAh 充电宝")
         self.assertEqual(candidates[0]["url"], "https://item.taobao.com/item.htm?id=1234567890")
         self.assertEqual(candidates[1]["platform"], "taobao")
+
+    def test_normalize_xhs_search_candidates_prefers_search_result_title_over_blank_explore_link(self):
+        module = importlib.import_module("domestic_browser")
+
+        normalized = module.normalize_xhs_search_candidates(
+            [
+                {
+                    "url": "https://www.xiaohongshu.com/explore/6845123a000000000c039899",
+                    "title": "",
+                    "text": "",
+                    "class_name": "",
+                },
+                {
+                    "url": "https://www.xiaohongshu.com/search_result/6845123a000000000c039899?xsec_token=abc",
+                    "title": "安克双线充电宝首充使用感受记录",
+                    "text": "安克双线充电宝首充使用感受记录 毛绒绒 2025-06-08 58",
+                    "class_name": "title",
+                },
+            ],
+            limit=5,
+        )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["title"], "安克双线充电宝首充使用感受记录")
+        self.assertIn("/search_result/6845123a000000000c039899", normalized[0]["url"])
 
     def test_cap_xhs_hits_limits_total_comments_to_twenty(self):
         module = importlib.import_module("domestic_browser")
@@ -208,6 +258,46 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
             row = copied_connection.execute("SELECT value FROM sample").fetchone()
             copied_connection.close()
             self.assertEqual(row[0], "trusted-session")
+            self.assertFalse(summary["errors"])
+
+    def test_sync_browser_profile_falls_back_to_esentutl_when_sqlite_backup_fails(self):
+        module = importlib.import_module("domestic_browser")
+
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as target_dir:
+            source_root = Path(source_dir)
+            target_root = Path(target_dir)
+            cookie_db = source_root / "Default" / "Network" / "Cookies"
+            cookie_db.parent.mkdir(parents=True)
+            cookie_db.write_text("locked-cookie-db", encoding="utf-8")
+
+            real_copy2 = module.shutil.copy2
+
+            def flaky_copy2(source, destination, *args, **kwargs):
+                if Path(source) == cookie_db:
+                    raise PermissionError("file is locked")
+                return real_copy2(source, destination, *args, **kwargs)
+
+            copied_targets = []
+
+            def fake_esentutl(source, destination):
+                copied_targets.append((Path(source), Path(destination)))
+                Path(destination).write_text("copied-with-esentutl", encoding="utf-8")
+                return True
+
+            with (
+                patch.object(module.shutil, "copy2", side_effect=flaky_copy2),
+                patch.object(module, "_copy_sqlite_database", return_value=False),
+                patch.object(module, "_copy_file_with_esentutl", side_effect=fake_esentutl),
+            ):
+                summary = module.sync_browser_profile(source_root, target_root)
+
+            self.assertTrue(summary["copied"])
+            self.assertEqual(copied_targets[0][0], cookie_db)
+            self.assertTrue((target_root / "Default" / "Network" / "Cookies").exists())
+            self.assertEqual(
+                (target_root / "Default" / "Network" / "Cookies").read_text(encoding="utf-8"),
+                "copied-with-esentutl",
+            )
             self.assertFalse(summary["errors"])
 
 

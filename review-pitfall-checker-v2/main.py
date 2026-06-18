@@ -49,9 +49,10 @@ except Exception:  # pragma: no cover - optional runtime dependency
     asyncpg = None
 
 try:
-    from domestic_browser import PlaywrightDomesticBrowserAdapter
+    from domestic_browser import PlaywrightDomesticBrowserAdapter, build_browser_session_config
 except Exception:  # pragma: no cover - optional runtime dependency
     PlaywrightDomesticBrowserAdapter = None
+    build_browser_session_config = None
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
@@ -520,6 +521,12 @@ def _should_fallback_to_local_structured(exc: Exception) -> bool:
         "type is unavailable now",
         "invalid_request_error",
         "structured output",
+        "connection error",
+        "apiconnectionerror",
+        "connecterror",
+        "all connection attempts failed",
+        "name or service not known",
+        "temporary failure in name resolution",
     )
     return any(marker in message for marker in fallback_markers)
 
@@ -882,8 +889,22 @@ def _browser_automation_enabled() -> bool:
     return os.getenv("FITORNOT_ENABLE_BROWSER_AUTOMATION", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _browser_profile_dir() -> Path:
+    default_profile_dir = Path(__file__).resolve().parent / ".browser-profile"
+    return Path(os.getenv("FITORNOT_BROWSER_PROFILE_DIR", default_profile_dir))
+
+
+def _browser_cdp_session_configured() -> bool:
+    if build_browser_session_config is None:
+        return False
+    with contextlib.suppress(Exception):
+        session_config = build_browser_session_config(_browser_profile_dir())
+        return session_config.get("mode") == "cdp"
+    return False
+
+
 def build_default_domestic_browser_adapter() -> Any:
-    if not _browser_automation_enabled():
+    if not (_browser_automation_enabled() or _browser_cdp_session_configured()):
         return None
     if PlaywrightDomesticBrowserAdapter is None:
         return None
@@ -912,11 +933,11 @@ def _browser_adapter_unavailable_error() -> RuntimeError:
 
 def _trusted_session_bootstrap_hint() -> str:
     adapter = get_domestic_browser_adapter()
-    default_profile_dir = Path(__file__).resolve().parent / ".browser-profile"
-    profile_dir = Path(getattr(adapter, "profile_dir", default_profile_dir))
+    profile_dir = Path(getattr(adapter, "profile_dir", _browser_profile_dir()))
+    launcher_script = Path(__file__).resolve().parent / "start_fitornot_browser.ps1"
     return (
-        f"Open the FITorNOT browser profile at {profile_dir} and log in once, or connect a trusted Chrome "
-        "session via FITORNOT_BROWSER_CDP_URL."
+        f"Run {launcher_script} to open the FITorNOT browser profile at {profile_dir} and log in once, "
+        "or connect a trusted Chrome session via FITORNOT_BROWSER_CDP_URL."
     )
 
 
@@ -971,17 +992,17 @@ def build_candidate_xhs_queries(candidates: list[dict[str, Any]], category: str)
 
     queries: list[str] = []
     seen: set[str] = set()
+    primary_probe = negative_terms[0]
     for candidate in candidates[:5]:
         title = candidate.get("title", "").strip()
         if not title:
             continue
-        for suffix in negative_terms[:2]:
-            query = f"{title} {suffix}"
-            if query in seen:
-                continue
-            seen.add(query)
-            queries.append(query)
-    return queries[:10]
+        query = f"{title} {primary_probe}"
+        if query in seen:
+            continue
+        seen.add(query)
+        queries.append(query)
+    return queries[:5]
 
 
 async def fetch_xiaohongshu_feedback(queries: list[str], limit: int = 10) -> list[dict[str, Any]]:

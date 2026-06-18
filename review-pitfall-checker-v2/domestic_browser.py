@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -40,6 +41,20 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _cdp_url_marker_path(profile_dir: Path | str | None) -> Path | None:
+    if not profile_dir:
+        return None
+    return Path(profile_dir) / "cdp-url.txt"
+
+
+def _read_cdp_url_marker(profile_dir: Path | str | None) -> str | None:
+    marker_path = _cdp_url_marker_path(profile_dir)
+    if marker_path is None or not marker_path.exists():
+        return None
+    value = marker_path.read_text(encoding="utf-8").replace("\ufeff", "").strip()
+    return value or None
+
+
 def _default_profile_source_root() -> Path | None:
     local_app_data = os.getenv("LOCALAPPDATA", "").strip()
     if not local_app_data:
@@ -51,8 +66,8 @@ def _default_profile_source_root() -> Path | None:
     return None
 
 
-def build_browser_session_config() -> dict[str, Any]:
-    cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip()
+def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[str, Any]:
+    cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip() or (_read_cdp_url_marker(profile_dir) or "")
     channel = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip() or DEFAULT_BROWSER_CHANNEL
     user_agent = os.getenv("FITORNOT_BROWSER_USER_AGENT", DEFAULT_BROWSER_USER_AGENT).strip() or DEFAULT_BROWSER_USER_AGENT
     source_root = os.getenv("FITORNOT_BROWSER_PROFILE_SOURCE_DIR", "").strip()
@@ -107,6 +122,9 @@ def sync_browser_profile(source_root: Path | str | None, target_root: Path | str
             if source_item.name == "Cookies" and _copy_sqlite_database(source_item, destination_item):
                 copied_entries += 1
                 continue
+            if source_item.name == "Cookies" and _copy_file_with_esentutl(source_item, destination_item):
+                copied_entries += 1
+                continue
             if source_item.name == "Cookies-journal":
                 continue
             errors.append(f"{relative_path}: {exc}")
@@ -127,6 +145,24 @@ def _copy_sqlite_database(source_item: Path, destination_item: Path) -> bool:
                 source_connection.backup(destination_connection)
         return True
     except sqlite3.Error:
+        return False
+
+
+def _copy_file_with_esentutl(source_item: Path, destination_item: Path) -> bool:
+    esentutl_path = shutil.which("esentutl.exe")
+    if not esentutl_path:
+        return False
+
+    destination_item.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            [esentutl_path, "/y", str(source_item), "/d", str(destination_item), "/o"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return destination_item.exists() and destination_item.stat().st_size > 0
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
@@ -261,6 +297,64 @@ def cap_xhs_hits(hits: list[dict[str, Any]], total_comment_limit: int = 20) -> l
                     "platform": str(hit.get("platform", "xiaohongshu")).strip() or "xiaohongshu",
                 }
             )
+    return normalized
+
+
+def _extract_xhs_note_id(url: str) -> str:
+    match = re.search(r"/(?:explore|search_result|discovery/item)/([^/?#]+)", url)
+    return match.group(1) if match else ""
+
+
+def normalize_xhs_search_candidates(items: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    ordered_ids: list[str] = []
+
+    for item in items:
+        url = str(item.get("url", "")).strip()
+        note_id = _extract_xhs_note_id(url)
+        if not note_id:
+            continue
+
+        normalized_url = url
+        if normalized_url.startswith("/"):
+            normalized_url = f"https://www.xiaohongshu.com{normalized_url}"
+
+        text = re.sub(r"\s+", " ", str(item.get("text", "")).strip())
+        title = re.sub(r"\s+", " ", str(item.get("title", "")).strip()) or text[:60]
+        if not note_id in grouped:
+            grouped[note_id] = {
+                "url": normalized_url,
+                "title": title,
+                "text": text,
+            }
+            ordered_ids.append(note_id)
+            continue
+
+        existing = grouped[note_id]
+        if "/search_result/" in normalized_url and "/search_result/" not in str(existing.get("url", "")):
+            existing["url"] = normalized_url
+        if len(title) > len(str(existing.get("title", ""))):
+            existing["title"] = title
+        if len(text) > len(str(existing.get("text", ""))):
+            existing["text"] = text
+
+    normalized: list[dict[str, Any]] = []
+    for note_id in ordered_ids:
+        item = grouped[note_id]
+        title = str(item.get("title", "")).strip()
+        text = str(item.get("text", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if not url or not (title or text):
+            continue
+        normalized.append(
+            {
+                "url": url,
+                "title": title or text[:60],
+                "text": text or title,
+            }
+        )
+        if len(normalized) >= limit:
+            break
     return normalized
 
 
@@ -446,7 +540,7 @@ class PlaywrightDomesticBrowserAdapter:
                 "`playwright install chromium`."
             ) from exc
 
-        session_config = build_browser_session_config()
+        session_config = build_browser_session_config(self.profile_dir)
         async with async_playwright() as playwright:
             if session_config["mode"] == "cdp":
                 browser = await playwright.chromium.connect_over_cdp(session_config["cdp_url"])
@@ -574,25 +668,30 @@ class PlaywrightDomesticBrowserAdapter:
         )
 
     async def _extract_xhs_search_results(self, page: Any, limit: int) -> list[dict[str, Any]]:
-        return await page.evaluate(
+        raw_results = await page.evaluate(
             """(limit) => {
-                const nodes = Array.from(document.querySelectorAll('a[href*="/explore/"], a[href*="/discovery/item/"]'));
+                const nodes = Array.from(document.querySelectorAll(
+                    'a[href*="/explore/"], a[href*="/discovery/item/"], a[href*="/search_result/"]'
+                ));
                 const results = [];
                 for (const node of nodes) {
                     const href = node.href || '';
                     const text = (node.innerText || '').replace(/\\s+/g, ' ').trim();
-                    if (!href || !text) continue;
+                    const className = typeof node.className === 'string' ? node.className : '';
+                    if (!href) continue;
                     results.push({
                         url: href.startsWith('http') ? href : `https://www.xiaohongshu.com${href}`,
                         title: text.slice(0, 60),
                         text: text,
+                        class_name: className,
                     });
-                    if (results.length >= limit) break;
+                    if (results.length >= limit * 8) break;
                 }
                 return results;
             }""",
             limit,
         )
+        return normalize_xhs_search_candidates(raw_results, limit=limit)
 
     async def _extract_xhs_note_detail(self, page: Any) -> dict[str, Any]:
         return await page.evaluate(

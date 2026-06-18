@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,9 +16,14 @@ class MainDecisionApiTest(unittest.TestCase):
         os.environ["DEEPSEEK_API_KEY"] = "test-deepseek-key"
         os.environ.pop("FITORNOT_FORCE_COMPAT_LLM", None)
         os.environ.pop("FITORNOT_ENABLE_BROWSER_AUTOMATION", None)
+        os.environ.pop("FITORNOT_BROWSER_CDP_URL", None)
+        self._browser_profile_dir = tempfile.TemporaryDirectory()
+        os.environ["FITORNOT_BROWSER_PROFILE_DIR"] = self._browser_profile_dir.name
         sys.modules.pop("main", None)
 
     def tearDown(self):
+        os.environ.pop("FITORNOT_BROWSER_PROFILE_DIR", None)
+        self._browser_profile_dir.cleanup()
         sys.modules.pop("main", None)
 
     def test_intent_slots_restricts_supported_categories(self):
@@ -834,6 +840,23 @@ class MainDecisionApiTest(unittest.TestCase):
 
         self.assertIsNone(adapter)
 
+    def test_default_browser_adapter_enables_when_cdp_session_is_configured(self):
+        module = importlib.import_module("main")
+        fake_adapter = object()
+        original_adapter_class = module.PlaywrightDomesticBrowserAdapter
+        os.environ.pop("FITORNOT_ENABLE_BROWSER_AUTOMATION", None)
+        os.environ["FITORNOT_BROWSER_CDP_URL"] = "http://127.0.0.1:9222"
+        module.set_domestic_browser_adapter(None)
+        module.PlaywrightDomesticBrowserAdapter = lambda: fake_adapter
+
+        try:
+            adapter = module.build_default_domestic_browser_adapter()
+        finally:
+            module.PlaywrightDomesticBrowserAdapter = original_adapter_class
+            os.environ.pop("FITORNOT_BROWSER_CDP_URL", None)
+
+        self.assertIs(adapter, fake_adapter)
+
     def test_local_intent_parser_detects_power_bank_from_plain_chinese_input(self):
         module = importlib.import_module("main")
 
@@ -905,6 +928,78 @@ class MainDecisionApiTest(unittest.TestCase):
 
         self.assertEqual(result["retrieval_plan"].ecommerce_query, "Anker 10000 充电宝")
         self.assertEqual(len(result["retrieval_plan"].xiaohongshu_queries), 2)
+
+    def test_create_decision_falls_back_locally_when_deepseek_connection_fails(self):
+        module = importlib.import_module("main")
+
+        class FakeStructuredLLM:
+            async def ainvoke(self, _messages):
+                raise RuntimeError("Connection error.")
+
+        class FakeLLM:
+            def with_structured_output(self, _schema):
+                return FakeStructuredLLM()
+
+        async def fake_fetch_node(state):
+            retrieval_plan = state["retrieval_plan"]
+            state["raw_data"] = module.RawPlatformData(
+                retrieval_plan=retrieval_plan,
+                verified_specs={"容量": "10000mAh", "额定能量": "37Wh"},
+                ecommerce_evidence=[
+                    module.EvidenceItem(
+                        source="电商追评",
+                        text="到手能上飞机，但壳体会发热。",
+                        platform="jd",
+                    )
+                ],
+                xiaohongshu_evidence=[
+                    module.EvidenceItem(
+                        source="小红书真实评论",
+                        text="安检会看 Wh 标注，37Wh 正常可带。",
+                        platform="xiaohongshu",
+                    )
+                ],
+            )
+            state["ecommerce_data"] = [
+                {
+                    "title": "Anker 10000mAh Nano",
+                    "price": "149",
+                    "shop_name": "Anker旗舰店",
+                    "url": "https://item.jd.com/1.html",
+                    "platform": "jd",
+                }
+            ]
+            state["xiaohongshu_data"] = [
+                {
+                    "query": retrieval_plan.xiaohongshu_queries[0],
+                    "notes": [{"text": "安检会看 Wh 标注，37Wh 正常可带。"}],
+                    "comments": [{"text": "能上飞机，但发热要注意。"}],
+                }
+            ]
+            state["blocked_sources"] = []
+            state["risk_dictionary"] = module._fallback_risk_dictionary("power_bank")
+            state["fetch_status"] = "success"
+            return state
+
+        module.build_deepseek_llm = lambda model, temperature=0.0: FakeLLM()
+        module.brightdata_mcp_fetch_node = fake_fetch_node
+
+        result = asyncio.run(
+            module.create_decision(
+                module.DecisionRequest(
+                    user_raw_input="我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+                    target_language="中文",
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.slots.category, module.SUPPORTED_CATEGORIES[0])
+        self.assertEqual(result.retrieval_plan.ecommerce_query, "Anker 10000 充电宝")
+        self.assertTrue(result.cleaned_findings.core_scandals)
+        self.assertIn("Wh", result.report)
+        self.assertTrue(result.ecommerce_data)
+        self.assertTrue(result.social_data)
 
     def test_brightdata_mcp_fetch_node_stays_on_domestic_path_when_domestic_fetch_fails(self):
         module = importlib.import_module("main")
@@ -1190,6 +1285,21 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(plan.xiaohongshu_queries[0], "Anker 10000 充电宝 发热")
         self.assertEqual(plan.xiaohongshu_queries[1], "Anker 10000 充电宝 虚标")
 
+    def test_build_candidate_xhs_queries_uses_one_probe_per_top_five_candidates(self):
+        module = importlib.import_module("main")
+
+        queries = module.build_candidate_xhs_queries(
+            [
+                {"title": f"Anker 候选{i}", "price": "149", "shop_name": "Anker旗舰店", "url": "", "platform": "jd"}
+                for i in range(1, 7)
+            ],
+            module.SUPPORTED_CATEGORIES[0],
+        )
+
+        self.assertEqual(len(queries), 5)
+        self.assertEqual(queries[0], "Anker 候选1 避雷")
+        self.assertEqual(queries[-1], "Anker 候选5 避雷")
+
     def test_domestic_recall_fetch_marks_empty_browser_results_as_partial_failure(self):
         module = importlib.import_module("main")
         slots = module.IntentSlots(category="充电宝", brand="Anker", model="10000", urls=[])
@@ -1262,6 +1372,7 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(result.fetch_status, "partial_failed")
         self.assertIn("FITORNOT_BROWSER_CDP_URL", result.blocked_sources[0]["reason"])
         self.assertIn(".browser-profile", result.blocked_sources[0]["reason"])
+        self.assertIn("start_fitornot_browser.ps1", result.blocked_sources[0]["reason"])
         self.assertIn("log in once", result.blocked_sources[1]["reason"])
 
 
