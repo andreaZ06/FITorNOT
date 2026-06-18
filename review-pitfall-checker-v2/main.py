@@ -248,6 +248,24 @@ class BrightDataFetchOutput(BaseModel):
     fetch_status: str = "success"
 
 
+class DomesticRecallInput(BaseModel):
+    user_raw_input: str
+    slots: IntentSlots
+    retrieval_plan: RetrievalPlan
+    use_mock: bool = False
+
+
+class DomesticRecallOutput(BaseModel):
+    raw_data: RawPlatformData
+    ecommerce_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    generated_xhs_queries: list[str] = Field(default_factory=list)
+    xiaohongshu_hits: list[dict[str, Any]] = Field(default_factory=list)
+    ecommerce_data: list[dict[str, Any]] = Field(default_factory=list)
+    xiaohongshu_data: list[dict[str, Any]] = Field(default_factory=list)
+    blocked_sources: list[dict[str, str]] = Field(default_factory=list)
+    fetch_status: str = "success"
+
+
 class AnalyzerInput(BaseModel):
     raw_data: RawPlatformData
     ecommerce_data: list[dict[str, Any]] = Field(default_factory=list)
@@ -804,6 +822,188 @@ async def create_decision(request: DecisionRequest, use_mock: bool | None = None
     )
 
 
+async def fetch_ecommerce_candidates(query: str, category: str, limit: int = 20) -> list[dict[str, Any]]:
+    raise RuntimeError("Playwright and DrissionPage are unavailable")
+
+
+def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        dedupe_key = re.sub(r"\s+", " ", title.lower())
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized.append(
+            {
+                "title": title,
+                "price": str(item.get("price", "")).strip(),
+                "shop_name": str(item.get("shop_name", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "platform": str(item.get("platform", "search")).strip(),
+            }
+        )
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def build_candidate_xhs_queries(candidates: list[dict[str, Any]], category: str) -> list[str]:
+    negative_terms = {
+        SUPPORTED_CATEGORIES[0]: ["避雷", "真实测评", "缺点"],
+        SUPPORTED_CATEGORIES[1]: ["避雷", "刺痛", "缺点"],
+        SUPPORTED_CATEGORIES[2]: ["避雷", "软便", "缺点"],
+        SUPPORTED_CATEGORIES[3]: ["避雷", "真实测评", "缺点"],
+    }.get(category, ["避雷", "真实测评", "缺点"])
+
+    queries: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates[:5]:
+        title = candidate.get("title", "").strip()
+        if not title:
+            continue
+        for suffix in negative_terms[:2]:
+            query = f"{title} {suffix}"
+            if query in seen:
+                continue
+            seen.add(query)
+            queries.append(query)
+    return queries[:10]
+
+
+async def fetch_xiaohongshu_feedback(queries: list[str], limit: int = 10) -> list[dict[str, Any]]:
+    raise RuntimeError("Playwright and DrissionPage are unavailable")
+
+
+def _candidate_to_evidence(candidate: dict[str, Any]) -> EvidenceItem:
+    text = " | ".join(
+        part for part in [candidate.get("title", ""), candidate.get("price", ""), candidate.get("shop_name", "")] if part
+    )
+    return EvidenceItem(
+        source="官方参数",
+        text=text or "候选商品信息缺失",
+        platform=candidate.get("platform") or "search",
+        url=candidate.get("url") or None,
+    )
+
+
+def _xhs_hit_to_evidence(hit: dict[str, Any]) -> list[EvidenceItem]:
+    evidence: list[EvidenceItem] = []
+    for note in hit.get("notes", [])[:10]:
+        note_text = str(note.get("text") or note.get("content") or "").strip()
+        if note_text:
+            evidence.append(
+                EvidenceItem(
+                    source="小红书笔记",
+                    text=note_text[:500],
+                    platform="xiaohongshu",
+                    url=hit.get("url") or None,
+                )
+            )
+    for comment in hit.get("comments", [])[:20]:
+        comment_text = str(comment.get("text") if isinstance(comment, dict) else comment).strip()
+        if comment_text:
+            evidence.append(
+                EvidenceItem(
+                    source="小红书真实评论",
+                    text=comment_text[:500],
+                    platform="xiaohongshu",
+                    url=hit.get("url") or None,
+                )
+            )
+    return evidence
+
+
+def _build_domestic_fetch_output(
+    payload: DomesticRecallInput,
+    ecommerce_candidates: list[dict[str, Any]],
+    generated_xhs_queries: list[str],
+    xiaohongshu_hits: list[dict[str, Any]],
+    blocked_sources: list[dict[str, str]],
+) -> DomesticRecallOutput:
+    raw_data = RawPlatformData(retrieval_plan=payload.retrieval_plan, blocked_sources=list(blocked_sources))
+    raw_data.ecommerce_evidence.extend(_candidate_to_evidence(candidate) for candidate in ecommerce_candidates)
+    for hit in xiaohongshu_hits:
+        raw_data.xiaohongshu_evidence.extend(_xhs_hit_to_evidence(hit))
+
+    fetch_status = "success"
+    if blocked_sources and not (ecommerce_candidates or xiaohongshu_hits):
+        fetch_status = "partial_failed"
+    elif blocked_sources:
+        fetch_status = "partial_failed"
+
+    return DomesticRecallOutput(
+        raw_data=raw_data,
+        ecommerce_candidates=ecommerce_candidates,
+        generated_xhs_queries=generated_xhs_queries,
+        xiaohongshu_hits=xiaohongshu_hits,
+        ecommerce_data=list(ecommerce_candidates),
+        xiaohongshu_data=list(xiaohongshu_hits),
+        blocked_sources=list(blocked_sources),
+        fetch_status=fetch_status,
+    )
+
+
+async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallOutput:
+    if payload.use_mock:
+        mock_candidates = [
+            {
+                "title": f"{payload.slots.brand or '候选'} {payload.slots.model or ''} 充电宝".strip(),
+                "price": "149",
+                "shop_name": f"{payload.slots.brand or '品牌'}旗舰店",
+                "url": "",
+                "platform": "jd",
+            }
+        ]
+        mock_queries = build_candidate_xhs_queries(mock_candidates, payload.slots.category) or list(
+            payload.retrieval_plan.xiaohongshu_queries
+        )
+        raw_data = mock_raw_platform_data(payload.slots, payload.retrieval_plan)
+        return DomesticRecallOutput(
+            raw_data=raw_data,
+            ecommerce_candidates=mock_candidates,
+            generated_xhs_queries=mock_queries,
+            xiaohongshu_hits=[],
+            ecommerce_data=[item.model_dump() for item in raw_data.ecommerce_evidence],
+            xiaohongshu_data=[item.model_dump() for item in raw_data.xiaohongshu_evidence],
+            blocked_sources=[],
+            fetch_status="success",
+        )
+
+    blocked_sources: list[dict[str, str]] = []
+    try:
+        raw_candidates = await fetch_ecommerce_candidates(
+            payload.retrieval_plan.ecommerce_query,
+            payload.slots.category,
+            limit=20,
+        )
+        ecommerce_candidates = normalize_ecommerce_candidates(raw_candidates, limit=5)
+    except Exception as exc:  # noqa: BLE001
+        ecommerce_candidates = []
+        blocked_sources.append({"source": "domestic_ecommerce", "reason": str(exc)})
+
+    generated_xhs_queries = build_candidate_xhs_queries(ecommerce_candidates, payload.slots.category)
+    if not generated_xhs_queries:
+        generated_xhs_queries = list(payload.retrieval_plan.xiaohongshu_queries)
+
+    try:
+        xiaohongshu_hits = await fetch_xiaohongshu_feedback(generated_xhs_queries, limit=10)
+    except Exception as exc:  # noqa: BLE001
+        xiaohongshu_hits = []
+        blocked_sources.append({"source": "xiaohongshu", "reason": str(exc)})
+
+    return _build_domestic_fetch_output(
+        payload,
+        ecommerce_candidates,
+        generated_xhs_queries,
+        xiaohongshu_hits,
+        blocked_sources,
+    )
+
+
 async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
     """Node 2 fetch path: connect to local Bright Data MCP through the official Python SDK."""
 
@@ -818,6 +1018,24 @@ async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
         use_mock=bool(state.get("use_mock")),
     )
     risk_dictionary = await load_risk_dictionary(_category_for_cleaning(payload.slots.category))
+    domestic_output = await domestic_recall_fetch(
+        DomesticRecallInput(
+            user_raw_input=payload.user_raw_input,
+            slots=payload.slots,
+            retrieval_plan=payload.retrieval_plan,
+            use_mock=payload.use_mock,
+        )
+    )
+
+    if payload.use_mock or domestic_output.ecommerce_candidates or domestic_output.xiaohongshu_hits:
+        state["raw_data"] = domestic_output.raw_data
+        state["ecommerce_data"] = domestic_output.ecommerce_data
+        state["xiaohongshu_data"] = domestic_output.xiaohongshu_data
+        state["blocked_sources"] = domestic_output.blocked_sources
+        state["risk_dictionary"] = risk_dictionary
+        state["fetch_status"] = domestic_output.fetch_status
+        state["generated_xhs_queries"] = domestic_output.generated_xhs_queries
+        return state
 
     if payload.use_mock:
         output = _build_mock_fetch_output(payload, risk_dictionary=risk_dictionary)
@@ -863,6 +1081,8 @@ async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
                 allow_synthetic_payload=False,
                 risk_dictionary=risk_dictionary,
             )
+            output.blocked_sources = output.blocked_sources + domestic_output.blocked_sources
+            output.raw_data.blocked_sources = output.raw_data.blocked_sources + domestic_output.blocked_sources
 
     state["raw_data"] = output.raw_data
     state["ecommerce_data"] = output.ecommerce_data

@@ -660,6 +660,90 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn("heavy", result["xiaohongshu_data"][0]["payload"]["matched_soft_terms"])
         self.assertTrue(result["ecommerce_data"][0]["payload"]["comments"][0]["is_critical_issue"])
 
+    def test_domestic_recall_fetch_builds_xhs_queries_from_top_ecommerce_candidates(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_ecommerce(query, category, limit):
+            self.assertEqual(query, "Anker 10000")
+            self.assertEqual(category, module.SUPPORTED_CATEGORIES[0])
+            self.assertEqual(limit, 20)
+            return [
+                {
+                    "title": "Anker 10000mAh Nano",
+                    "price": "149",
+                    "shop_name": "Anker旗舰店",
+                    "url": "https://item.jd.com/1.html",
+                    "platform": "jd",
+                },
+                {
+                    "title": "Anker 20000mAh PowerCore",
+                    "price": "229",
+                    "shop_name": "Anker京东自营",
+                    "url": "https://item.jd.com/2.html",
+                    "platform": "jd",
+                },
+            ]
+
+        async def fake_xhs(queries, limit):
+            self.assertEqual(limit, 10)
+            self.assertTrue(any("避雷" in query or "真实测评" in query or "缺点" in query for query in queries))
+            return [{"query": queries[0], "notes": [], "comments": []}]
+
+        module.fetch_ecommerce_candidates = fake_ecommerce
+        module.fetch_xiaohongshu_feedback = fake_xhs
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.ecommerce_candidates[0]["title"], "Anker 10000mAh Nano")
+        self.assertTrue(result.generated_xhs_queries)
+        self.assertTrue(any("Anker 10000mAh Nano" in query for query in result.generated_xhs_queries))
+
+    def test_domestic_recall_fetch_falls_back_cleanly_when_browser_tools_are_missing(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def broken_ecommerce(query, category, limit):
+            raise RuntimeError("Playwright and DrissionPage are unavailable")
+
+        module.fetch_ecommerce_candidates = broken_ecommerce
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.fetch_status, "partial_failed")
+        self.assertTrue(result.blocked_sources)
+        self.assertEqual(result.blocked_sources[0]["source"], "domestic_ecommerce")
+
 
 if __name__ == "__main__":
     unittest.main()
