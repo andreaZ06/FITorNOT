@@ -513,6 +513,33 @@ def render_prompt_template(template: str, **kwargs: Any) -> str:
     return rendered
 
 
+def _should_fallback_to_local_structured(exc: Exception) -> bool:
+    message = str(exc).lower()
+    fallback_markers = (
+        "response_format",
+        "type is unavailable now",
+        "invalid_request_error",
+        "structured output",
+    )
+    return any(marker in message for marker in fallback_markers)
+
+
+async def _invoke_structured_or_local(
+    llm: Any,
+    schema: type[BaseModel],
+    messages: list[tuple[str, str]],
+    local_factory: Callable[[], BaseModel],
+) -> BaseModel:
+    structured_llm = llm.with_structured_output(schema)
+    try:
+        return await structured_llm.ainvoke(messages)
+    except Exception as exc:  # noqa: BLE001
+        if not _should_fallback_to_local_structured(exc):
+            raise
+        LOGGER.warning("Structured LLM output failed for %s, falling back locally: %s", schema.__name__, exc)
+        return local_factory()
+
+
 def _fallback_risk_dictionary(category_key: str) -> RiskDictionary:
     payload = DEFAULT_RISK_DICTIONARIES.get(category_key, {})
     return RiskDictionary(
@@ -652,12 +679,14 @@ async def planner_node(state: DecisionState) -> DecisionState:
         slots = infer_intent_slots_locally(payload.user_raw_input)
     else:
         llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
-        structured_llm = llm.with_structured_output(IntentSlots)
-        slots = await structured_llm.ainvoke(
+        slots = await _invoke_structured_or_local(
+            llm,
+            IntentSlots,
             [
                 ("system", PLANNER_SYSTEM_PROMPT),
                 ("user", payload.user_raw_input),
-            ]
+            ],
+            lambda: infer_intent_slots_locally(payload.user_raw_input),
         )
     state["slots"] = IntentSlots.model_validate(slots)
     return state
@@ -671,8 +700,9 @@ async def retriever_node(state: DecisionState) -> DecisionState:
         retrieval_plan = build_local_retrieval_plan(payload.slots)
     else:
         llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
-        structured_llm = llm.with_structured_output(RetrievalPlan)
-        retrieval_plan = await structured_llm.ainvoke(
+        retrieval_plan = await _invoke_structured_or_local(
+            llm,
+            RetrievalPlan,
             [
                 (
                     "system",
@@ -684,7 +714,8 @@ async def retriever_node(state: DecisionState) -> DecisionState:
                     ),
                 ),
                 ("user", payload.slots.model_dump_json()),
-            ]
+            ],
+            lambda: build_local_retrieval_plan(payload.slots),
         )
         retrieval_plan = RetrievalPlan.model_validate(retrieval_plan)
 
@@ -712,12 +743,19 @@ async def analyzer_node(state: DecisionState) -> DecisionState:
         )
     else:
         llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
-        structured_llm = llm.with_structured_output(CleanedFindings)
-        findings = await structured_llm.ainvoke(
+        findings = await _invoke_structured_or_local(
+            llm,
+            CleanedFindings,
             [
                 ("system", ANALYZER_SYSTEM_PROMPT),
                 ("user", payload.raw_data.model_dump_json()),
-            ]
+            ],
+            lambda: analyze_raw_data_locally(
+                payload.raw_data,
+                payload.ecommerce_data,
+                payload.xiaohongshu_data,
+                payload.risk_dictionary,
+            ),
         )
     state["cleaned_findings"] = CleanedFindings.model_validate(findings)
     return state
@@ -739,12 +777,14 @@ async def scenario_adapter_node(state: DecisionState) -> DecisionState:
         scenario_fit = adapt_scenario_locally(payload)
     else:
         llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
-        structured_llm = llm.with_structured_output(ScenarioFit)
-        scenario_fit = await structured_llm.ainvoke(
+        scenario_fit = await _invoke_structured_or_local(
+            llm,
+            ScenarioFit,
             [
                 ("system", SCENARIO_ADAPTER_SYSTEM_PROMPT),
                 ("user", payload.model_dump_json()),
-            ]
+            ],
+            lambda: adapt_scenario_locally(payload),
         )
     state["scenario_fit"] = ScenarioFit.model_validate(scenario_fit)
     return state
@@ -764,8 +804,9 @@ async def generator_node(state: DecisionState) -> DecisionState:
         final_report = FinalReport(report=render_report_locally(payload))
     else:
         llm = build_deepseek_llm("deepseek-reasoner", temperature=0.1)
-        structured_llm = llm.with_structured_output(FinalReport)
-        final_report = await structured_llm.ainvoke(
+        final_report = await _invoke_structured_or_local(
+            llm,
+            FinalReport,
             [
                 (
                     "system",
@@ -778,7 +819,8 @@ async def generator_node(state: DecisionState) -> DecisionState:
                     ),
                 ),
                 ("user", payload.model_dump_json()),
-            ]
+            ],
+            lambda: FinalReport(report=render_report_locally(payload)),
         )
     state["final_report"] = FinalReport.model_validate(final_report)
     return state
@@ -1033,6 +1075,8 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
             limit=20,
         )
         ecommerce_candidates = normalize_ecommerce_candidates(raw_candidates, limit=5)
+        if not ecommerce_candidates:
+            blocked_sources.append({"source": "domestic_ecommerce", "reason": "no browser results returned"})
     except Exception as exc:  # noqa: BLE001
         ecommerce_candidates = []
         blocked_sources.append({"source": "domestic_ecommerce", "reason": str(exc)})
@@ -1043,6 +1087,8 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
 
     try:
         xiaohongshu_hits = await fetch_xiaohongshu_feedback(generated_xhs_queries, limit=10)
+        if not xiaohongshu_hits:
+            blocked_sources.append({"source": "xiaohongshu", "reason": "no browser results returned"})
     except Exception as exc:  # noqa: BLE001
         xiaohongshu_hits = []
         blocked_sources.append({"source": "xiaohongshu", "reason": str(exc)})
@@ -1057,7 +1103,7 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
 
 
 async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
-    """Node 2 fetch path: connect to local Bright Data MCP through the official Python SDK."""
+    """Node 2 fetch path: domestic browser recall only."""
 
     payload = BrightDataFetchInput(
         user_raw_input=state["user_raw_input"],
@@ -1078,70 +1124,13 @@ async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
             use_mock=payload.use_mock,
         )
     )
-
-    if payload.use_mock or domestic_output.ecommerce_candidates or domestic_output.xiaohongshu_hits:
-        state["raw_data"] = domestic_output.raw_data
-        state["ecommerce_data"] = domestic_output.ecommerce_data
-        state["xiaohongshu_data"] = domestic_output.xiaohongshu_data
-        state["blocked_sources"] = domestic_output.blocked_sources
-        state["risk_dictionary"] = risk_dictionary
-        state["fetch_status"] = domestic_output.fetch_status
-        state["generated_xhs_queries"] = domestic_output.generated_xhs_queries
-        return state
-
-    if payload.use_mock:
-        output = _build_mock_fetch_output(payload, risk_dictionary=risk_dictionary)
-    else:
-        try:
-            if ClientSession is None or StdioServerParameters is None or stdio_client is None:
-                raise RuntimeError("python mcp SDK is not installed.")
-
-            server_params = StdioServerParameters(
-                command="npx",
-                args=["-y", "@brightdata/mcp-server-scraper"],
-                env=_build_brightdata_server_env(),
-            )
-            tasks = _build_brightdata_tasks(payload)
-
-            async with stdio_client(server_params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    tools = _extract_mcp_tools(await session.list_tools())
-                    tool_schemas = [schema for schema in (_tool_to_openai_schema(tool) for tool in tools) if schema]
-                    if not tool_schemas:
-                        raise RuntimeError("Bright Data MCP exposed no callable tools.")
-
-                    llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
-                    bound_llm = llm.bind_tools(tool_schemas)
-                    response = await bound_llm.ainvoke(_build_brightdata_fetch_messages(payload, tasks))
-                    tool_calls = _extract_tool_calls(response)
-                    if not tool_calls:
-                        tool_calls = _build_fallback_tool_calls(_preferred_tool_name(tool_schemas), tasks)
-
-                    output = await _execute_brightdata_tool_calls(
-                        session,
-                        payload,
-                        tasks,
-                        tool_calls,
-                        risk_dictionary,
-                    )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Bright Data MCP fetch failed: %s", exc)
-            output = _build_mock_fetch_output(
-                payload,
-                reason=str(exc),
-                allow_synthetic_payload=False,
-                risk_dictionary=risk_dictionary,
-            )
-            output.blocked_sources = output.blocked_sources + domestic_output.blocked_sources
-            output.raw_data.blocked_sources = output.raw_data.blocked_sources + domestic_output.blocked_sources
-
-    state["raw_data"] = output.raw_data
-    state["ecommerce_data"] = output.ecommerce_data
-    state["xiaohongshu_data"] = output.xiaohongshu_data
-    state["blocked_sources"] = output.blocked_sources
-    state["risk_dictionary"] = output.risk_dictionary or risk_dictionary
-    state["fetch_status"] = output.fetch_status
+    state["raw_data"] = domestic_output.raw_data
+    state["ecommerce_data"] = domestic_output.ecommerce_data
+    state["xiaohongshu_data"] = domestic_output.xiaohongshu_data
+    state["blocked_sources"] = domestic_output.blocked_sources
+    state["risk_dictionary"] = risk_dictionary
+    state["fetch_status"] = domestic_output.fetch_status
+    state["generated_xhs_queries"] = domestic_output.generated_xhs_queries
     return state
 
 
@@ -1552,6 +1541,8 @@ def build_local_retrieval_plan(slots: IntentSlots) -> RetrievalPlan:
     subject = " ".join(part for part in [slots.brand, slots.model] if part) or slots.category
     if slots.category == "充电宝" and slots.brand and not slots.model:
         subject = f"{slots.brand} 充电宝"
+    elif slots.category == "充电宝" and slots.brand and slots.model and re.fullmatch(r"\d{4,6}", slots.model):
+        subject = f"{slots.brand} {slots.model} 充电宝"
     probes = {
         "充电宝": ["发热", "虚标"],
         "面膜": ["刺痛", "过敏"],

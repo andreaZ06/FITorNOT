@@ -165,7 +165,7 @@ class MainDecisionApiTest(unittest.TestCase):
 
         result = asyncio.run(module.retriever_node(state))
 
-        self.assertEqual(result["retrieval_plan"].ecommerce_query, "Anker 10000")
+        self.assertEqual(result["retrieval_plan"].ecommerce_query, "Anker 10000 充电宝")
         self.assertEqual(len(result["retrieval_plan"].xiaohongshu_queries), 2)
 
     def test_planner_node_uses_user_text_in_compat_mode_without_prompt_pollution(self):
@@ -680,7 +680,7 @@ class MainDecisionApiTest(unittest.TestCase):
         retrieval_plan = module.build_local_retrieval_plan(slots)
 
         async def fake_ecommerce(query, category, limit):
-            self.assertEqual(query, "Anker 10000")
+            self.assertEqual(query, "Anker 10000 充电宝")
             self.assertEqual(category, module.SUPPORTED_CATEGORIES[0])
             self.assertEqual(limit, 20)
             return [
@@ -702,7 +702,7 @@ class MainDecisionApiTest(unittest.TestCase):
 
         async def fake_xhs(queries, limit):
             self.assertEqual(limit, 10)
-            self.assertTrue(any("避雷" in query or "真实测评" in query or "缺点" in query for query in queries))
+            self.assertTrue(any("发热" in query or "虚标" in query for query in queries))
             return [{"query": queries[0], "notes": [], "comments": []}]
 
         module.fetch_ecommerce_candidates = fake_ecommerce
@@ -833,6 +833,400 @@ class MainDecisionApiTest(unittest.TestCase):
         adapter = module.build_default_domestic_browser_adapter()
 
         self.assertIsNone(adapter)
+
+    def test_local_intent_parser_detects_power_bank_from_plain_chinese_input(self):
+        module = importlib.import_module("main")
+
+        slots = module.infer_intent_slots_locally("我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀")
+
+        self.assertEqual(slots.category, module.SUPPORTED_CATEGORIES[0])
+        self.assertEqual(slots.brand, "Anker")
+        self.assertEqual(slots.model, "10000")
+
+    def test_planner_node_falls_back_when_structured_output_is_unavailable(self):
+        module = importlib.import_module("main")
+
+        class FakeStructuredLLM:
+            async def ainvoke(self, _messages):
+                raise RuntimeError("This response_format type is unavailable now")
+
+        class FakeLLM:
+            def with_structured_output(self, _schema):
+                return FakeStructuredLLM()
+
+        module.build_deepseek_llm = lambda model, temperature=0.0: FakeLLM()
+        state = {
+            "user_raw_input": "我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+            "target_language": "中文",
+            "use_mock": False,
+        }
+
+        result = asyncio.run(module.planner_node(state))
+
+        self.assertEqual(result["slots"].category, module.SUPPORTED_CATEGORIES[0])
+        self.assertEqual(result["slots"].brand, "Anker")
+        self.assertEqual(result["slots"].model, "10000")
+
+    def test_retriever_node_falls_back_when_structured_output_is_unavailable(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+
+        class FakeStructuredLLM:
+            async def ainvoke(self, _messages):
+                raise RuntimeError("This response_format type is unavailable now")
+
+        class FakeLLM:
+            def with_structured_output(self, _schema):
+                return FakeStructuredLLM()
+
+        async def fake_fetch_node(state):
+            state["raw_data"] = module.RawPlatformData(retrieval_plan=state["retrieval_plan"])
+            state["ecommerce_data"] = []
+            state["xiaohongshu_data"] = []
+            state["blocked_sources"] = []
+            state["fetch_status"] = "success"
+            return state
+
+        module.build_deepseek_llm = lambda model, temperature=0.0: FakeLLM()
+        module.brightdata_mcp_fetch_node = fake_fetch_node
+        state = {
+            "user_raw_input": "我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+            "target_language": "中文",
+            "slots": slots,
+            "use_mock": False,
+        }
+
+        result = asyncio.run(module.retriever_node(state))
+
+        self.assertEqual(result["retrieval_plan"].ecommerce_query, "Anker 10000 充电宝")
+        self.assertEqual(len(result["retrieval_plan"].xiaohongshu_queries), 2)
+
+    def test_brightdata_mcp_fetch_node_stays_on_domestic_path_when_domestic_fetch_fails(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_domestic_fetch(_payload):
+            return module.DomesticRecallOutput(
+                raw_data=module.RawPlatformData(
+                    retrieval_plan=retrieval_plan,
+                    blocked_sources=[
+                        {"source": "domestic_ecommerce", "reason": "captcha blocked"},
+                        {"source": "xiaohongshu", "reason": "login required"},
+                    ],
+                ),
+                ecommerce_candidates=[],
+                generated_xhs_queries=list(retrieval_plan.xiaohongshu_queries),
+                xiaohongshu_hits=[],
+                ecommerce_data=[],
+                xiaohongshu_data=[],
+                blocked_sources=[
+                    {"source": "domestic_ecommerce", "reason": "captcha blocked"},
+                    {"source": "xiaohongshu", "reason": "login required"},
+                ],
+                fetch_status="partial_failed",
+            )
+
+        def explode(*_args, **_kwargs):
+            raise AssertionError("Bright Data fallback should not be called")
+
+        module.domestic_recall_fetch = fake_domestic_fetch
+        module.StdioServerParameters = explode
+        state = {
+            "user_raw_input": "我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+            "target_language": "中文",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": [],
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+            "use_mock": False,
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertEqual(result["fetch_status"], "partial_failed")
+        self.assertEqual(result["blocked_sources"][0]["source"], "domestic_ecommerce")
+        self.assertEqual(result["blocked_sources"][1]["source"], "xiaohongshu")
+
+    def test_brightdata_mcp_fetch_node_binds_tools_and_writes_back_state(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="A1647",
+            urls=["https://item.jd.com/1.html"],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_domestic_fetch(_payload):
+            return module.DomesticRecallOutput(
+                raw_data=module.RawPlatformData(
+                    retrieval_plan=retrieval_plan,
+                    ecommerce_evidence=[
+                        module.EvidenceItem(source="官方参数", text="Anker 10000mAh | 37Wh", platform="jd")
+                    ],
+                    xiaohongshu_evidence=[
+                        module.EvidenceItem(source="小红书真实评论", text="能上飞机，但安检会看Wh", platform="xiaohongshu")
+                    ],
+                ),
+                ecommerce_candidates=[
+                    {
+                        "title": "Anker 10000mAh Nano",
+                        "price": "149",
+                        "shop_name": "Anker旗舰店",
+                        "url": "https://item.jd.com/1.html",
+                        "platform": "jd",
+                    }
+                ],
+                generated_xhs_queries=list(retrieval_plan.xiaohongshu_queries),
+                xiaohongshu_hits=[
+                    {
+                        "query": retrieval_plan.xiaohongshu_queries[0],
+                        "notes": [{"text": "能上飞机，但安检会看Wh"}],
+                        "comments": [{"text": "我带过，没被拦"}],
+                    }
+                ],
+                ecommerce_data=[
+                    {
+                        "title": "Anker 10000mAh Nano",
+                        "price": "149",
+                        "shop_name": "Anker旗舰店",
+                        "url": "https://item.jd.com/1.html",
+                        "platform": "jd",
+                    }
+                ],
+                xiaohongshu_data=[
+                    {
+                        "query": retrieval_plan.xiaohongshu_queries[0],
+                        "notes": [{"text": "能上飞机，但安检会看Wh"}],
+                        "comments": [{"text": "我带过，没被拦"}],
+                    }
+                ],
+                blocked_sources=[],
+                fetch_status="success",
+            )
+
+        module.domestic_recall_fetch = fake_domestic_fetch
+        state = {
+            "user_raw_input": "Need a flight-safe power bank with fewer heat complaints.",
+            "target_language": "English",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": list(slots.urls),
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertTrue(result["ecommerce_data"])
+        self.assertTrue(result["xiaohongshu_data"])
+        self.assertTrue(result["raw_data"].ecommerce_evidence)
+        self.assertTrue(result["raw_data"].xiaohongshu_evidence)
+        self.assertEqual(result["generated_xhs_queries"], list(retrieval_plan.xiaohongshu_queries))
+
+    def test_brightdata_mcp_fetch_node_gracefully_degrades_on_mcp_errors(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="A1647",
+            urls=["https://item.jd.com/1.html"],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+        state = {
+            "user_raw_input": "Need a reliable power bank.",
+            "target_language": "English",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": list(slots.urls),
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertTrue(result["raw_data"].blocked_sources)
+        self.assertIn("Playwright browser adapter is unavailable", result["raw_data"].blocked_sources[0]["reason"])
+        self.assertEqual(result["fetch_status"], "partial_failed")
+        self.assertFalse(result["ecommerce_data"])
+        self.assertFalse(result["xiaohongshu_data"])
+        self.assertFalse(result["raw_data"].ecommerce_evidence)
+        self.assertFalse(result["raw_data"].xiaohongshu_evidence)
+
+    def test_brightdata_mcp_fetch_node_filters_noise_before_state_writeback(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="A1647",
+            urls=["https://item.jd.com/1.html"],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_ecommerce(query, category, limit):
+            self.assertEqual(query, "Anker A1647")
+            self.assertEqual(category, module.SUPPORTED_CATEGORIES[0])
+            self.assertEqual(limit, 20)
+            return [
+                {
+                    "title": "Anker A1647 10000mAh",
+                    "price": "149",
+                    "shop_name": "Anker旗舰店",
+                    "url": "https://item.jd.com/1.html",
+                    "platform": "jd",
+                }
+            ]
+
+        async def fake_xhs(queries, limit):
+            self.assertEqual(limit, 10)
+            self.assertTrue(queries)
+            return [
+                {
+                    "query": queries[0],
+                    "notes": [{"text": "我出差用了一周，发热是有的，但安检主要会看Wh标注。"}],
+                    "comments": [{"text": "我也觉得发热明显，夏天不太敢放包里"}],
+                }
+            ]
+
+        module.fetch_ecommerce_candidates = fake_ecommerce
+        module.fetch_xiaohongshu_feedback = fake_xhs
+
+        state = {
+            "user_raw_input": "Need a travel power bank with fewer heat complaints.",
+            "target_language": "English",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": list(slots.urls),
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertTrue(result["ecommerce_data"])
+        self.assertTrue(result["xiaohongshu_data"])
+        self.assertIn("Anker A1647 10000mAh", result["raw_data"].ecommerce_evidence[0].text)
+        self.assertIn("发热", result["raw_data"].xiaohongshu_evidence[0].text)
+
+    def test_brightdata_fetch_writes_risk_dictionary_hits_back_to_state(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="A1647",
+            urls=["https://item.jd.com/1.html"],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_load_risk_dictionary(_category_key):
+            return module.RiskDictionary(
+                category_key="power_bank",
+                critical_terms=["overheat"],
+                veto_terms=["flight banned"],
+                soft_terms=["heavy"],
+                source="neon",
+            )
+
+        async def fake_domestic_fetch(_payload):
+            return module.DomesticRecallOutput(
+                raw_data=module.RawPlatformData(
+                    retrieval_plan=retrieval_plan,
+                    ecommerce_evidence=[
+                        module.EvidenceItem(
+                            source="电商追评",
+                            text="follow-up: overheat and flight banned on airline",
+                            platform="jd",
+                        )
+                    ],
+                    xiaohongshu_evidence=[
+                        module.EvidenceItem(
+                            source="小红书真实评论",
+                            text="heavy but usable, flight banned at check-in",
+                            platform="xiaohongshu",
+                        )
+                    ],
+                ),
+                ecommerce_candidates=[],
+                generated_xhs_queries=list(retrieval_plan.xiaohongshu_queries),
+                xiaohongshu_hits=[],
+                ecommerce_data=[],
+                xiaohongshu_data=[],
+                blocked_sources=[],
+                fetch_status="success",
+            )
+
+        module.load_risk_dictionary = fake_load_risk_dictionary
+        module.domestic_recall_fetch = fake_domestic_fetch
+        state = {
+            "user_raw_input": "Need a flight-safe power bank.",
+            "target_language": "English",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": list(slots.urls),
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertEqual(result["risk_dictionary"].source, "neon")
+        self.assertIn("flight banned", result["raw_data"].ecommerce_evidence[0].text)
+        self.assertIn("heavy", result["raw_data"].xiaohongshu_evidence[0].text)
+
+    def test_build_local_retrieval_plan_appends_category_for_numeric_power_bank_models(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category="充电宝", brand="Anker", model="10000", urls=[])
+
+        plan = module.build_local_retrieval_plan(slots)
+
+        self.assertEqual(plan.ecommerce_query, "Anker 10000 充电宝")
+        self.assertEqual(plan.xiaohongshu_queries[0], "Anker 10000 充电宝 发热")
+        self.assertEqual(plan.xiaohongshu_queries[1], "Anker 10000 充电宝 虚标")
+
+    def test_domestic_recall_fetch_marks_empty_browser_results_as_partial_failure(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category="充电宝", brand="Anker", model="10000", urls=[])
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_ecommerce(_query, _category, limit):
+            self.assertEqual(limit, 20)
+            return []
+
+        async def fake_xhs(queries, limit):
+            self.assertEqual(limit, 10)
+            self.assertTrue(queries)
+            return []
+
+        module.fetch_ecommerce_candidates = fake_ecommerce
+        module.fetch_xiaohongshu_feedback = fake_xhs
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.fetch_status, "partial_failed")
+        self.assertFalse(result.ecommerce_candidates)
+        self.assertFalse(result.xiaohongshu_hits)
+        self.assertEqual(
+            [item["source"] for item in result.blocked_sources],
+            ["domestic_ecommerce", "xiaohongshu"],
+        )
+        self.assertIn("no browser results", result.blocked_sources[0]["reason"])
+        self.assertIn("no browser results", result.blocked_sources[1]["reason"])
 
 
 if __name__ == "__main__":
