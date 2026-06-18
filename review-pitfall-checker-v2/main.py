@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -24,9 +25,12 @@ except Exception:  # pragma: no cover - local test fallback
     _ChatOpenAI = None
 
 try:
-    from langchain_mcp_adapters.client import MultiServerMCPClient
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
 except Exception:  # pragma: no cover - local test fallback
-    MultiServerMCPClient = None
+    ClientSession = None
+    StdioServerParameters = None
+    stdio_client = None
 
 try:
     from langgraph.graph import END, StateGraph as _StateGraph
@@ -208,6 +212,22 @@ class RetrieverInput(BaseModel):
     use_mock: bool = False
 
 
+class BrightDataFetchInput(BaseModel):
+    user_raw_input: str
+    slots: IntentSlots
+    retrieval_plan: RetrievalPlan
+    user_bound_urls: list[str] = Field(default_factory=list)
+    generated_xhs_queries: list[str] = Field(default_factory=list)
+    use_mock: bool = False
+
+
+class BrightDataFetchOutput(BaseModel):
+    raw_data: RawPlatformData
+    ecommerce_data: list[dict[str, Any]] = Field(default_factory=list)
+    xiaohongshu_data: list[dict[str, Any]] = Field(default_factory=list)
+    blocked_sources: list[dict[str, str]] = Field(default_factory=list)
+
+
 class AnalyzerInput(BaseModel):
     raw_data: RawPlatformData
 
@@ -240,6 +260,7 @@ class DecisionResponse(BaseModel):
     cleaned_findings: CleanedFindings
     scenario_fit: ScenarioFit
     ecommerce_data: list[dict[str, Any]]
+    xiaohongshu_data: list[dict[str, Any]] = Field(default_factory=list)
     social_data: list[dict[str, Any]]
     blocked_sources: list[dict[str, str]]
     report: str
@@ -251,7 +272,12 @@ class DecisionState(TypedDict):
     use_mock: NotRequired[bool]
     slots: NotRequired[IntentSlots]
     retrieval_plan: NotRequired[RetrievalPlan]
+    user_bound_urls: NotRequired[list[str]]
+    generated_xhs_queries: NotRequired[list[str]]
     raw_data: NotRequired[RawPlatformData]
+    ecommerce_data: NotRequired[list[dict[str, Any]]]
+    xiaohongshu_data: NotRequired[list[dict[str, Any]]]
+    blocked_sources: NotRequired[list[dict[str, str]]]
     cleaned_findings: NotRequired[CleanedFindings]
     scenario_fit: NotRequired[ScenarioFit]
     final_report: NotRequired[FinalReport]
@@ -265,6 +291,34 @@ class _CompatChatOpenAI:
 
     def with_structured_output(self, schema: type[BaseModel]) -> "_CompatStructuredLLM":
         return _CompatStructuredLLM(schema)
+
+    def bind_tools(self, tools: list[dict[str, Any]]) -> "_CompatToolBoundLLM":
+        return _CompatToolBoundLLM(tools)
+
+
+class _CompatToolResponse:
+    def __init__(self, tool_calls: list[dict[str, Any]]) -> None:
+        self.tool_calls = tool_calls
+
+
+class _CompatToolBoundLLM:
+    def __init__(self, tools: list[dict[str, Any]]) -> None:
+        self.tools = tools
+
+    async def ainvoke(self, value: Any) -> _CompatToolResponse:
+        text = _messages_to_text(value)
+        tool_name = _preferred_tool_name(self.tools)
+        tool_calls: list[dict[str, Any]] = []
+        for url in URL_PATTERN.findall(text):
+            tool_calls.append({"name": tool_name, "args": {"url": url}})
+        for line in text.splitlines():
+            if '"kind": "xiaohongshu"' in line and '"query": "' in line:
+                query = line.split('"query": "', 1)[1].split('"', 1)[0]
+                tool_calls.append({"name": tool_name, "args": {"query": query}})
+            elif '"kind": "ecommerce"' in line and '"query": "' in line:
+                query = line.split('"query": "', 1)[1].split('"', 1)[0]
+                tool_calls.append({"name": tool_name, "args": {"query": query}})
+        return _CompatToolResponse(tool_calls)
 
 
 class _CompatStructuredLLM:
@@ -351,6 +405,7 @@ class _CompatStateGraph:
 
 
 StateGraph = _StateGraph or _CompatStateGraph
+LOGGER = logging.getLogger("fitornot.brightdata")
 
 
 def build_deepseek_llm(model: str, temperature: float = 0.0) -> Any:
@@ -392,31 +447,28 @@ async def retriever_node(state: DecisionState) -> DecisionState:
     payload = RetrieverInput(slots=state["slots"], use_mock=bool(state.get("use_mock")))
     if payload.use_mock:
         retrieval_plan = build_local_retrieval_plan(payload.slots)
-        raw_data = mock_raw_platform_data(payload.slots, retrieval_plan)
-        state["retrieval_plan"] = retrieval_plan
-        state["raw_data"] = raw_data
-        return state
-
-    llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
-    structured_llm = llm.with_structured_output(RetrievalPlan)
-    retrieval_plan = await structured_llm.ainvoke(
-        [
-            (
-                "system",
-                RETRIEVER_SYSTEM_PROMPT.format(
-                    category=payload.slots.category,
-                    brand=payload.slots.brand,
-                    model=payload.slots.model,
+    else:
+        llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
+        structured_llm = llm.with_structured_output(RetrievalPlan)
+        retrieval_plan = await structured_llm.ainvoke(
+            [
+                (
+                    "system",
+                    RETRIEVER_SYSTEM_PROMPT.format(
+                        category=payload.slots.category,
+                        brand=payload.slots.brand,
+                        model=payload.slots.model,
+                    ),
                 ),
-            ),
-            ("user", payload.slots.model_dump_json()),
-        ]
-    )
-    retrieval_plan = RetrievalPlan.model_validate(retrieval_plan)
-    raw_data = await fetch_brightdata_sources(payload.slots, retrieval_plan)
+                ("user", payload.slots.model_dump_json()),
+            ]
+        )
+        retrieval_plan = RetrievalPlan.model_validate(retrieval_plan)
+
     state["retrieval_plan"] = retrieval_plan
-    state["raw_data"] = raw_data
-    return state
+    state["user_bound_urls"] = list(payload.slots.urls)
+    state["generated_xhs_queries"] = list(retrieval_plan.xiaohongshu_queries)
+    return await brightdata_mcp_fetch_node(state)
 
 
 async def analyzer_node(state: DecisionState) -> DecisionState:
@@ -530,114 +582,355 @@ async def create_decision(request: DecisionRequest, use_mock: bool | None = None
         raw_data=raw_data,
         cleaned_findings=final_state["cleaned_findings"],
         scenario_fit=final_state["scenario_fit"],
-        ecommerce_data=[item.model_dump() for item in raw_data.ecommerce_evidence],
-        social_data=[item.model_dump() for item in raw_data.xiaohongshu_evidence],
-        blocked_sources=raw_data.blocked_sources,
+        ecommerce_data=final_state.get("ecommerce_data", [item.model_dump() for item in raw_data.ecommerce_evidence]),
+        xiaohongshu_data=final_state.get(
+            "xiaohongshu_data",
+            [item.model_dump() for item in raw_data.xiaohongshu_evidence],
+        ),
+        social_data=final_state.get(
+            "xiaohongshu_data",
+            [item.model_dump() for item in raw_data.xiaohongshu_evidence],
+        ),
+        blocked_sources=final_state.get("blocked_sources", raw_data.blocked_sources),
         report=final_state["final_report"].report,
     )
 
 
-async def fetch_brightdata_sources(slots: IntentSlots, retrieval_plan: RetrievalPlan) -> RawPlatformData:
-    try:
-        tool_router = await build_brightdata_tool_router()
-    except Exception as exc:  # noqa: BLE001
-        raw_data = mock_raw_platform_data(slots, retrieval_plan)
-        raw_data.blocked_sources.append({"source": "brightdata", "reason": f"MCP unavailable: {exc}"})
-        return raw_data
+async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
+    """Node 2 fetch path: connect to local Bright Data MCP through the official Python SDK."""
 
-    ecommerce_tasks = [
-        fetch_one_source(tool_router, {"kind": "ecommerce", "query": retrieval_plan.ecommerce_query, "url": url})
-        for url in slots.urls
-    ]
-    ecommerce_tasks.append(
-        fetch_one_source(tool_router, {"kind": "ecommerce", "query": retrieval_plan.ecommerce_query, "url": ""})
+    payload = BrightDataFetchInput(
+        user_raw_input=state["user_raw_input"],
+        slots=state["slots"],
+        retrieval_plan=state["retrieval_plan"],
+        user_bound_urls=list(state.get("user_bound_urls", state["slots"].urls)),
+        generated_xhs_queries=list(
+            state.get("generated_xhs_queries", state["retrieval_plan"].xiaohongshu_queries)
+        ),
+        use_mock=bool(state.get("use_mock")),
     )
-    social_tasks = [
-        fetch_one_source(tool_router, {"kind": "social", "query": query, "url": ""})
-        for query in retrieval_plan.xiaohongshu_queries
-    ]
 
+    if payload.use_mock:
+        output = _build_mock_fetch_output(payload)
+    else:
+        try:
+            if ClientSession is None or StdioServerParameters is None or stdio_client is None:
+                raise RuntimeError("python mcp SDK is not installed.")
+
+            server_params = StdioServerParameters(
+                command="npx",
+                args=["-y", "@brightdata/mcp-server-scraper"],
+                env=_build_brightdata_server_env(),
+            )
+            tasks = _build_brightdata_tasks(payload)
+
+            async with stdio_client(server_params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    tools = _extract_mcp_tools(await session.list_tools())
+                    tool_schemas = [schema for schema in (_tool_to_openai_schema(tool) for tool in tools) if schema]
+                    if not tool_schemas:
+                        raise RuntimeError("Bright Data MCP exposed no callable tools.")
+
+                    llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
+                    bound_llm = llm.bind_tools(tool_schemas)
+                    response = await bound_llm.ainvoke(_build_brightdata_fetch_messages(payload, tasks))
+                    tool_calls = _extract_tool_calls(response)
+                    if not tool_calls:
+                        tool_calls = _build_fallback_tool_calls(_preferred_tool_name(tool_schemas), tasks)
+
+                    output = await _execute_brightdata_tool_calls(session, payload, tasks, tool_calls)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Bright Data MCP fetch failed: %s", exc)
+            output = _build_mock_fetch_output(payload, reason=str(exc))
+
+    state["raw_data"] = output.raw_data
+    state["ecommerce_data"] = output.ecommerce_data
+    state["xiaohongshu_data"] = output.xiaohongshu_data
+    state["blocked_sources"] = output.blocked_sources
+    return state
+
+
+async def fetch_brightdata_sources(slots: IntentSlots, retrieval_plan: RetrievalPlan) -> RawPlatformData:
+    output = await _run_brightdata_fetch(
+        BrightDataFetchInput(
+            user_raw_input="",
+            slots=slots,
+            retrieval_plan=retrieval_plan,
+            user_bound_urls=list(slots.urls),
+            generated_xhs_queries=list(retrieval_plan.xiaohongshu_queries),
+        )
+    )
+    return output.raw_data
+
+
+async def _run_brightdata_fetch(payload: BrightDataFetchInput) -> BrightDataFetchOutput:
+    state: DecisionState = {
+        "user_raw_input": payload.user_raw_input,
+        "target_language": "",
+        "slots": payload.slots,
+        "retrieval_plan": payload.retrieval_plan,
+        "user_bound_urls": payload.user_bound_urls,
+        "generated_xhs_queries": payload.generated_xhs_queries,
+        "use_mock": payload.use_mock,
+    }
+    state = await brightdata_mcp_fetch_node(state)
+    return BrightDataFetchOutput(
+        raw_data=state["raw_data"],
+        ecommerce_data=state.get("ecommerce_data", []),
+        xiaohongshu_data=state.get("xiaohongshu_data", []),
+        blocked_sources=state.get("blocked_sources", []),
+    )
+
+
+def _build_mock_fetch_output(payload: BrightDataFetchInput, reason: str | None = None) -> BrightDataFetchOutput:
+    raw_data = mock_raw_platform_data(payload.slots, payload.retrieval_plan)
+    if reason:
+        raw_data.blocked_sources.append({"source": "brightdata", "reason": reason})
+    ecommerce_data = [item.model_dump() for item in raw_data.ecommerce_evidence]
+    xiaohongshu_data = [item.model_dump() for item in raw_data.xiaohongshu_evidence]
+    return BrightDataFetchOutput(
+        raw_data=raw_data,
+        ecommerce_data=ecommerce_data,
+        xiaohongshu_data=xiaohongshu_data,
+        blocked_sources=raw_data.blocked_sources,
+    )
+
+
+def _build_brightdata_server_env() -> dict[str, str]:
+    env = dict(os.environ)
+    api_key = os.getenv("BRIGHTDATA_API_KEY")
+    if api_key:
+        env["BRIGHTDATA_API_KEY"] = api_key
+    return env
+
+
+def _extract_mcp_tools(list_tools_result: Any) -> list[Any]:
+    if isinstance(list_tools_result, list):
+        return list_tools_result
+    if hasattr(list_tools_result, "tools"):
+        return list(getattr(list_tools_result, "tools"))
+    if isinstance(list_tools_result, dict) and "tools" in list_tools_result:
+        return list(list_tools_result["tools"])
+    return []
+
+
+def _tool_to_openai_schema(tool: Any) -> dict[str, Any] | None:
+    name = getattr(tool, "name", None) or (tool.get("name") if isinstance(tool, dict) else None)
+    if not name:
+        return None
+    description = getattr(tool, "description", None) or (
+        tool.get("description") if isinstance(tool, dict) else ""
+    )
+    input_schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+    if input_schema is None and isinstance(tool, dict):
+        input_schema = tool.get("inputSchema") or tool.get("input_schema")
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description or "Bright Data MCP tool",
+            "parameters": input_schema or {"type": "object", "properties": {}},
+        },
+    }
+
+
+def _preferred_tool_name(tool_schemas: list[dict[str, Any]]) -> str:
+    preferred_fragments = ("brightdata__scrape", "scrape", "search", "discover")
+    names = [schema.get("function", {}).get("name", "") for schema in tool_schemas]
+    for fragment in preferred_fragments:
+        for name in names:
+            if fragment in name:
+                return name
+    return names[0] if names else "brightdata__scrape"
+
+
+def _build_brightdata_tasks(payload: BrightDataFetchInput) -> list[dict[str, str]]:
+    tasks: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add_task(kind: str, platform: str, url: str = "", query: str = "") -> None:
+        key = (kind, url, query)
+        if key in seen:
+            return
+        seen.add(key)
+        tasks.append({"kind": kind, "platform": platform, "url": url, "query": query})
+
+    for url in payload.user_bound_urls:
+        add_task("ecommerce", _infer_platform(url), url=url, query=payload.retrieval_plan.ecommerce_query)
+    if payload.retrieval_plan.ecommerce_query:
+        add_task("ecommerce", "search", query=payload.retrieval_plan.ecommerce_query)
+    for query in payload.generated_xhs_queries or payload.retrieval_plan.xiaohongshu_queries:
+        add_task("xiaohongshu", "xiaohongshu", query=query)
+    return tasks
+
+
+def _build_brightdata_fetch_messages(
+    payload: BrightDataFetchInput, tasks: list[dict[str, str]]
+) -> list[tuple[str, str]]:
+    system_prompt = (
+        "You are FITorNOT's Bright Data MCP fetch operator. "
+        "You have live Bright Data MCP tools available right now. "
+        "Prioritize direct scraping for every URL in state.user_bound_urls. "
+        "Then cover the ecommerce search query and the generated_xhs_queries for Xiaohongshu. "
+        "Call the MCP tools only with the exact url or query values provided in the task list. "
+        "Do not summarize; just decide which tools to call so the workflow can collect raw evidence."
+    )
+    user_payload = {
+        "user_raw_input": payload.user_raw_input,
+        "slots": payload.slots.model_dump(),
+        "user_bound_urls": payload.user_bound_urls,
+        "generated_xhs_queries": payload.generated_xhs_queries,
+        "tasks": tasks,
+    }
+    return [("system", system_prompt), ("user", json.dumps(user_payload, ensure_ascii=False))]
+
+
+def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
+    raw_calls = getattr(response, "tool_calls", None)
+    if raw_calls is None and isinstance(response, dict):
+        raw_calls = response.get("tool_calls")
+    normalized: list[dict[str, Any]] = []
+    for call in raw_calls or []:
+        name = call.get("name") if isinstance(call, dict) else None
+        args = call.get("args") if isinstance(call, dict) else None
+        if isinstance(call, dict) and call.get("function"):
+            function = call["function"]
+            name = name or function.get("name")
+            args = args or function.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {"query": args}
+        if name and isinstance(args, dict):
+            normalized.append({"name": name, "args": args})
+    return normalized
+
+
+def _build_fallback_tool_calls(tool_name: str, tasks: list[dict[str, str]]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for task in tasks:
+        args = {"url": task["url"]} if task.get("url") else {"query": task["query"]}
+        calls.append({"name": tool_name, "args": args})
+    return calls
+
+
+async def _execute_brightdata_tool_calls(
+    session: Any,
+    payload: BrightDataFetchInput,
+    tasks: list[dict[str, str]],
+    tool_calls: list[dict[str, Any]],
+) -> BrightDataFetchOutput:
     blocked_sources: list[dict[str, str]] = []
     ecommerce_evidence: list[EvidenceItem] = []
     xiaohongshu_evidence: list[EvidenceItem] = []
+    ecommerce_data: list[dict[str, Any]] = []
+    xiaohongshu_data: list[dict[str, Any]] = []
     verified_specs: dict[str, Any] = {}
 
-    for result in await asyncio.gather(*(ecommerce_tasks + social_tasks), return_exceptions=True):
-        if isinstance(result, Exception):
-            blocked_sources.append({"source": "brightdata", "reason": str(result)})
-            continue
-        if result["kind"] == "social":
-            xiaohongshu_evidence.extend(result["evidence"])
-        else:
-            ecommerce_evidence.extend(result["evidence"])
-            verified_specs.update(result.get("verified_specs", {}))
+    for tool_call in tool_calls:
+        tool_name = tool_call["name"]
+        tool_arguments = tool_call["args"]
+        task = _match_task_for_call(tool_arguments, tasks)
+        try:
+            raw_result = await session.call_tool(tool_name, tool_arguments)
+            normalized_result = _normalize_call_tool_result(raw_result)
+            evidence_kind = "social" if task["kind"] == "xiaohongshu" else "ecommerce"
+            evidence = normalize_raw_evidence(normalized_result, evidence_kind)
+            record = {
+                "tool_name": tool_name,
+                "platform": task["platform"],
+                "url": task["url"],
+                "query": task["query"],
+                "payload": normalized_result,
+            }
+            if task["kind"] == "xiaohongshu":
+                xiaohongshu_data.append(record)
+                xiaohongshu_evidence.extend(evidence)
+            else:
+                ecommerce_data.append(record)
+                ecommerce_evidence.extend(evidence)
+                verified_specs.update(infer_specs_from_evidence(evidence))
+        except Exception as exc:  # noqa: BLE001
+            blocked_sources.append(
+                {
+                    "source": task["platform"],
+                    "url": task["url"] or task["query"],
+                    "reason": str(exc),
+                }
+            )
 
     if not ecommerce_evidence and not xiaohongshu_evidence:
-        fallback = mock_raw_platform_data(slots, retrieval_plan)
-        fallback.blocked_sources.append(
-            {"source": "brightdata", "reason": "All MCP calls failed; mock schema payload used."}
-        )
-        return fallback
+        return _build_mock_fetch_output(payload, reason="All MCP tool calls failed; mock schema payload used.")
 
-    return RawPlatformData(
-        retrieval_plan=retrieval_plan,
+    raw_data = RawPlatformData(
+        retrieval_plan=payload.retrieval_plan,
         verified_specs=verified_specs,
         ecommerce_evidence=ecommerce_evidence,
         xiaohongshu_evidence=xiaohongshu_evidence,
         blocked_sources=blocked_sources,
     )
-
-
-async def build_brightdata_tool_router() -> Callable[[dict[str, str]], Awaitable[Any]]:
-    if MultiServerMCPClient is None:
-        raise RuntimeError("langchain_mcp_adapters is not installed.")
-
-    client = MultiServerMCPClient(
-        {
-            "brightdata": {
-                "command": "powershell",
-                "args": [
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(Path.home() / ".codex" / "mcp" / "brightdata-mcp.ps1"),
-                ],
-                "transport": "stdio",
-            }
-        }
+    return BrightDataFetchOutput(
+        raw_data=raw_data,
+        ecommerce_data=ecommerce_data,
+        xiaohongshu_data=xiaohongshu_data,
+        blocked_sources=blocked_sources,
     )
-    tools = await client.get_tools()
-    tools_by_name = {tool.name: tool for tool in tools}
-    preferred_names = [
-        "brightdata__scrape",
-        "scrape_as_markdown",
-        "scrape_batch",
-        "search_engine",
-        "discover",
-    ]
-    selected = next((tools_by_name[name] for name in preferred_names if name in tools_by_name), None)
-    if selected is None:
-        raise RuntimeError("brightdata MCP connected, but no supported scrape/search tool was found.")
-
-    async def route(query: dict[str, str]) -> Any:
-        payload = {"url": query["url"]} if query.get("url") else {"query": query["query"]}
-        return await selected.ainvoke(payload)
-
-    return route
 
 
-async def fetch_one_source(
-    tool_router: Callable[[dict[str, str]], Awaitable[Any]], query: dict[str, str]
-) -> dict[str, Any]:
-    raw = await tool_router(query)
-    evidence = normalize_raw_evidence(raw, query["kind"])
-    return {
-        "kind": query["kind"],
-        "query": query["query"],
-        "verified_specs": infer_specs_from_evidence(evidence),
-        "evidence": evidence,
-    }
+def _match_task_for_call(tool_arguments: dict[str, Any], tasks: list[dict[str, str]]) -> dict[str, str]:
+    url = str(tool_arguments.get("url", "") or "")
+    query = str(tool_arguments.get("query", "") or "")
+    for task in tasks:
+        if url and task["url"] == url:
+            return task
+        if query and task["query"] == query:
+            return task
+    if "xiaohongshu" in url.lower():
+        return {"kind": "xiaohongshu", "platform": "xiaohongshu", "url": url, "query": query}
+    return {"kind": "ecommerce", "platform": _infer_platform(url or query), "url": url, "query": query}
+
+
+def _normalize_call_tool_result(result: Any) -> Any:
+    structured = getattr(result, "structuredContent", None)
+    if structured is None and isinstance(result, dict):
+        structured = result.get("structuredContent")
+    if structured is not None:
+        return structured
+
+    content = getattr(result, "content", None)
+    if content is None and isinstance(result, dict):
+        content = result.get("content")
+    if content:
+        lines: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                lines.append(item)
+                continue
+            if isinstance(item, dict):
+                if item.get("text"):
+                    lines.append(str(item["text"]))
+                else:
+                    lines.append(json.dumps(item, ensure_ascii=False))
+                continue
+            text = getattr(item, "text", None)
+            lines.append(str(text if text is not None else item))
+        return "\n".join(lines)
+    if isinstance(result, BaseModel):
+        return result.model_dump()
+    return result
+
+
+def _infer_platform(value: str) -> str:
+    lowered = value.lower()
+    if "xiaohongshu" in lowered:
+        return "xiaohongshu"
+    if "jd.com" in lowered:
+        return "jd"
+    if "taobao.com" in lowered or "tmall.com" in lowered:
+        return "taobao"
+    return "search"
 
 
 def build_local_retrieval_plan(slots: IntentSlots) -> RetrievalPlan:

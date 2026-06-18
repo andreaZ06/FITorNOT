@@ -119,5 +119,184 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertTrue(response.social_data)
 
 
+    def test_brightdata_mcp_fetch_node_binds_tools_and_writes_back_state(self):
+        module = importlib.import_module("main")
+        os.environ["BRIGHTDATA_API_KEY"] = "brightdata-test-key"
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="A1647",
+            urls=["https://item.jd.com/1.html"],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+        captures = {}
+
+        class FakeTool:
+            def __init__(self, name, description, input_schema):
+                self.name = name
+                self.description = description
+                self.inputSchema = input_schema
+
+        class FakeBoundLLM:
+            async def ainvoke(self, messages):
+                captures["messages"] = messages
+                return type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "tool_calls": [
+                            {"name": "brightdata__scrape", "args": {"url": slots.urls[0]}},
+                            {
+                                "name": "brightdata__scrape",
+                                "args": {"query": retrieval_plan.xiaohongshu_queries[0]},
+                            },
+                        ]
+                    },
+                )()
+
+        class FakeLLM:
+            def bind_tools(self, tools):
+                captures["bound_tools"] = tools
+                return FakeBoundLLM()
+
+        class FakeServerParameters:
+            def __init__(self, command, args, env=None):
+                captures["server_command"] = command
+                captures["server_args"] = args
+                captures["server_env"] = env or {}
+
+        class FakeClientSession:
+            def __init__(self, read_stream, write_stream):
+                self.calls = []
+                captures["session_streams"] = (read_stream, write_stream)
+
+            async def __aenter__(self):
+                captures["session_entered"] = True
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def initialize(self):
+                captures["initialized"] = True
+
+            async def list_tools(self):
+                captures["listed_tools"] = True
+                return [
+                    FakeTool(
+                        "brightdata__scrape",
+                        "Scrape a public page by url or query",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string"},
+                                "query": {"type": "string"},
+                            },
+                        },
+                    )
+                ]
+
+            async def call_tool(self, tool_name, tool_arguments):
+                self.calls.append((tool_name, tool_arguments))
+                captures["tool_calls"] = list(self.calls)
+                if tool_arguments.get("url"):
+                    return {
+                        "product_title": "Official SKU",
+                        "parameters": ["20000mAh", "74Wh"],
+                        "reviews": ["heavier than expected but usable"],
+                    }
+                return {
+                    "notes": ["发热明显，通勤包里偏重"],
+                    "comments": ["评论区说安检会看 Wh 标注"],
+                }
+
+        class FakeStdioClient:
+            async def __aenter__(self):
+                captures["stdio_entered"] = True
+                return ("read_stream", "write_stream")
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_stdio_client(server_params):
+            captures["server_params"] = server_params
+            return FakeStdioClient()
+
+        module.StdioServerParameters = FakeServerParameters
+        module.ClientSession = FakeClientSession
+        module.stdio_client = fake_stdio_client
+        module.build_deepseek_llm = lambda model, temperature=0.0: FakeLLM()
+
+        state = {
+            "user_raw_input": "Need a flight-safe power bank with fewer heat complaints.",
+            "target_language": "English",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": list(slots.urls),
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertEqual(captures["server_command"], "npx")
+        self.assertEqual(captures["server_args"], ["-y", "@brightdata/mcp-server-scraper"])
+        self.assertEqual(captures["server_env"]["BRIGHTDATA_API_KEY"], "brightdata-test-key")
+        self.assertTrue(captures["initialized"])
+        self.assertTrue(captures["listed_tools"])
+        self.assertEqual(captures["bound_tools"][0]["function"]["name"], "brightdata__scrape")
+        self.assertEqual(captures["tool_calls"][0], ("brightdata__scrape", {"url": slots.urls[0]}))
+        self.assertEqual(
+            captures["tool_calls"][1],
+            ("brightdata__scrape", {"query": retrieval_plan.xiaohongshu_queries[0]}),
+        )
+        self.assertTrue(result["ecommerce_data"])
+        self.assertTrue(result["xiaohongshu_data"])
+        self.assertTrue(result["raw_data"].ecommerce_evidence)
+        self.assertTrue(result["raw_data"].xiaohongshu_evidence)
+
+    def test_brightdata_mcp_fetch_node_gracefully_degrades_on_mcp_errors(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="A1647",
+            urls=["https://item.jd.com/1.html"],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        class FakeServerParameters:
+            def __init__(self, command, args, env=None):
+                self.command = command
+                self.args = args
+                self.env = env or {}
+
+        class BrokenStdioClient:
+            async def __aenter__(self):
+                raise TimeoutError("429 rate limited")
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        module.StdioServerParameters = FakeServerParameters
+        module.ClientSession = type("FakeClientSession", (), {"__init__": lambda self, *_args, **_kwargs: None})
+        module.stdio_client = lambda server_params: BrokenStdioClient()
+
+        state = {
+            "user_raw_input": "Need a reliable power bank.",
+            "target_language": "English",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": list(slots.urls),
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertTrue(result["raw_data"].blocked_sources)
+        self.assertIn("429 rate limited", result["raw_data"].blocked_sources[0]["reason"])
+        self.assertTrue(result["ecommerce_data"])
+        self.assertTrue(result["xiaohongshu_data"])
+
+
 if __name__ == "__main__":
     unittest.main()
