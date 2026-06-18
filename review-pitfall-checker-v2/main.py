@@ -349,6 +349,28 @@ class _CompatChatOpenAI:
         return _CompatToolBoundLLM(tools)
 
 
+class _DeepSeekChatOpenAI:
+    def __init__(self, **kwargs: Any) -> None:
+        if _ChatOpenAI is None:  # pragma: no cover - guarded by factory
+            raise RuntimeError("langchain_openai.ChatOpenAI is unavailable")
+        self.model_name = kwargs.get("model") or kwargs.get("model_name")
+        self.openai_api_base = kwargs.get("base_url")
+        self.temperature = kwargs.get("temperature")
+        self._client = _ChatOpenAI(**kwargs)
+
+    def with_structured_output(self, schema: type[BaseModel]) -> "_DeepSeekPromptStructuredLLM":
+        return _DeepSeekPromptStructuredLLM(self._client, schema)
+
+    def bind_tools(self, tools: list[dict[str, Any]]) -> Any:
+        return self._client.bind_tools(tools)
+
+    async def ainvoke(self, value: Any) -> Any:
+        return await self._client.ainvoke(value)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
 class _CompatToolResponse:
     def __init__(self, tool_calls: list[dict[str, Any]]) -> None:
         self.tool_calls = tool_calls
@@ -396,6 +418,22 @@ class _CompatStructuredLLM:
             payload = _json_from_messages(value)
             return FinalReport(report=render_report_locally(GeneratorInput.model_validate(payload)))
         raise RuntimeError(f"Unsupported structured schema: {self.schema}")
+
+
+class _DeepSeekPromptStructuredLLM:
+    def __init__(self, client: Any, schema: type[BaseModel]) -> None:
+        self._client = client
+        self.schema = schema
+
+    async def ainvoke(self, value: Any) -> BaseModel:
+        response = await self._client.ainvoke(_append_structured_json_instruction(value, self.schema))
+        try:
+            payload = _extract_json_payload_from_response(response)
+            return self.schema.model_validate(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"Structured JSON parse failed for {self.schema.__name__}: {exc}"
+            ) from exc
 
 
 class _CompatNode:
@@ -499,7 +537,10 @@ def build_deepseek_llm(model: str, temperature: float = 0.0) -> Any:
         "yes",
         "on",
     }
-    cls = _CompatChatOpenAI if use_compat or _ChatOpenAI is None else _ChatOpenAI
+    if use_compat or _ChatOpenAI is None:
+        cls = _CompatChatOpenAI
+    else:
+        cls = _DeepSeekChatOpenAI
     return cls(
         model=model,
         api_key=api_key,
@@ -528,8 +569,65 @@ def _should_fallback_to_local_structured(exc: Exception) -> bool:
         "all connection attempts failed",
         "name or service not known",
         "temporary failure in name resolution",
+        "structured json parse failed",
     )
     return any(marker in message for marker in fallback_markers)
+
+
+def _append_structured_json_instruction(value: Any, schema: type[BaseModel]) -> list[tuple[str, str]]:
+    instruction = (
+        "Return exactly one JSON object that matches the schema below. "
+        "Do not use markdown fences. Do not add explanation text.\n"
+        f"{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
+    )
+    if isinstance(value, list):
+        return [*value, ("system", instruction)]
+    if isinstance(value, tuple) and len(value) == 2:
+        return [value, ("system", instruction)]
+    return [("user", str(value)), ("system", instruction)]
+
+
+def _extract_json_payload_from_response(response: Any) -> Any:
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if "text" in item:
+                    parts.append(str(item["text"]))
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False))
+            else:
+                text = getattr(item, "text", None)
+                parts.append(str(text if text is not None else item))
+        text = "\n".join(part for part in parts if part).strip()
+    else:
+        text = str(content).strip()
+    return _extract_json_payload_from_text(text)
+
+
+def _extract_json_payload_from_text(text: str) -> Any:
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, count=1, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s*```$", "", candidate, count=1).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(candidate):
+            if char not in "{[":
+                continue
+            try:
+                payload, end = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            trailing = candidate[index + end :].strip()
+            if not trailing or trailing == "```":
+                return payload
+        raise
 
 
 async def _invoke_structured_or_local(

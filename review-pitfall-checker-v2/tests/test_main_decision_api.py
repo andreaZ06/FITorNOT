@@ -87,6 +87,47 @@ class MainDecisionApiTest(unittest.TestCase):
 
         self.assertIsInstance(chat_llm, module._CompatChatOpenAI)
 
+    def test_deepseek_llm_uses_prompt_structured_wrapper_for_real_client(self):
+        module = importlib.import_module("main")
+        os.environ["DEEPSEEK_API_KEY"] = "real-deepseek-key"
+        sentinel = object()
+
+        class FakeResponse:
+            content = '{"category":"充电宝","brand":"Anker","model":"10000","urls":[]}'
+
+        class FakeNativeChatOpenAI:
+            def __init__(self, **kwargs):
+                self.model_name = kwargs.get("model")
+                self.openai_api_base = kwargs.get("base_url")
+                self.temperature = kwargs.get("temperature")
+
+            def with_structured_output(self, *_args, **_kwargs):
+                raise AssertionError("native structured output should not be used for DeepSeek")
+
+            def bind_tools(self, _tools):
+                return sentinel
+
+            async def ainvoke(self, _messages):
+                return FakeResponse()
+
+        original_chat_openai = module._ChatOpenAI
+        module._ChatOpenAI = FakeNativeChatOpenAI
+        try:
+            chat_llm = module.build_deepseek_llm("deepseek-chat", temperature=0.0)
+            slots = asyncio.run(
+                chat_llm.with_structured_output(module.IntentSlots).ainvoke(
+                    [("system", "extract slots"), ("user", "我想买Anker 10000毫安的充电宝")]
+                )
+            )
+            bound = chat_llm.bind_tools([{"type": "function", "function": {"name": "demo", "parameters": {}}}])
+        finally:
+            module._ChatOpenAI = original_chat_openai
+
+        self.assertEqual(slots.category, module.SUPPORTED_CATEGORIES[0])
+        self.assertEqual(slots.brand, "Anker")
+        self.assertEqual(slots.model, "10000")
+        self.assertIs(bound, sentinel)
+
     def test_decision_graph_contains_required_nodes_and_edges(self):
         module = importlib.import_module("main")
 
