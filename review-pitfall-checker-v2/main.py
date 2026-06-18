@@ -355,7 +355,7 @@ class _CompatStructuredLLM:
 
     async def ainvoke(self, value: Any) -> BaseModel:
         if self.schema is IntentSlots:
-            text = _messages_to_text(value)
+            text = _last_user_message_text(value)
             return infer_intent_slots_locally(text)
         if self.schema is RetrievalPlan:
             payload = _json_from_messages(value)
@@ -475,6 +475,13 @@ def build_deepseek_llm(model: str, temperature: float = 0.0) -> Any:
         base_url=DEEPSEEK_BASE_URL,
         temperature=temperature,
     )
+
+
+def render_prompt_template(template: str, **kwargs: Any) -> str:
+    rendered = template
+    for key, value in kwargs.items():
+        rendered = rendered.replace(f"{{{key}}}", str(value))
+    return rendered
 
 
 def _fallback_risk_dictionary(category_key: str) -> RiskDictionary:
@@ -640,7 +647,8 @@ async def retriever_node(state: DecisionState) -> DecisionState:
             [
                 (
                     "system",
-                    RETRIEVER_SYSTEM_PROMPT.format(
+                    render_prompt_template(
+                        RETRIEVER_SYSTEM_PROMPT,
                         category=payload.slots.category,
                         brand=payload.slots.brand,
                         model=payload.slots.model,
@@ -732,7 +740,8 @@ async def generator_node(state: DecisionState) -> DecisionState:
             [
                 (
                     "system",
-                    GENERATOR_SYSTEM_PROMPT.format(
+                    render_prompt_template(
+                        GENERATOR_SYSTEM_PROMPT,
                         target_language=payload.target_language,
                         verified_specs=payload.raw_data.verified_specs,
                         core_scandals_and_evidences=payload.cleaned_findings.model_dump(),
@@ -1339,9 +1348,15 @@ def mock_raw_platform_data(slots: IntentSlots, retrieval_plan: RetrievalPlan) ->
             EvidenceItem(source="小红书真实评论", text="适口性一般，需要拌罐头才吃", platform="xiaohongshu"),
         ]
     else:
-        specs = {"容量": "20000mAh", "额定能量": "74Wh", "快充": "22.5W"}
+        capacity_text = infer_capacity_text(slots, retrieval_plan)
+        wh_value = infer_wh_value(capacity_text)
+        specs = {"容量": capacity_text, "额定能量": wh_value, "快充": "22.5W"}
         ecommerce = [
-            EvidenceItem(source="官方参数", text="商品参数：20000mAh，标称74Wh，支持22.5W快充", platform="jd"),
+            EvidenceItem(
+                source="官方参数",
+                text=f"商品参数：{capacity_text}，标称{wh_value}，支持22.5W快充",
+                platform="jd",
+            ),
             EvidenceItem(source="电商追评", text="用了两周后壳发热明显，边充边放包里不放心", platform="jd"),
             EvidenceItem(source="电商差评", text="重量比页面轻薄宣传重，随身小包放不下", platform="taobao"),
         ]
@@ -1373,6 +1388,26 @@ def normalize_raw_evidence(raw: Any, kind: str) -> list[EvidenceItem]:
     else:
         lines = [str(raw)]
     return [EvidenceItem(source=source, text=line[:500]) for line in lines[:8]]
+
+
+def infer_capacity_text(slots: IntentSlots, retrieval_plan: RetrievalPlan) -> str:
+    candidates = [slots.model or "", retrieval_plan.ecommerce_query]
+    for candidate in candidates:
+        match = re.search(r"(\d{4,6})\s*(mAh|毫安)?", candidate, re.IGNORECASE)
+        if match:
+            return f"{match.group(1)}mAh"
+    return "20000mAh"
+
+
+def infer_wh_value(capacity_text: str) -> str:
+    match = re.search(r"(\d{4,6})", capacity_text)
+    if not match:
+        return "74Wh"
+    mah_value = int(match.group(1))
+    wh_value = round(mah_value * 3.7 / 1000, 1)
+    if wh_value.is_integer():
+        return f"{int(wh_value)}Wh"
+    return f"{wh_value}Wh"
 
 
 def infer_specs_from_evidence(evidence: list[EvidenceItem]) -> dict[str, Any]:
@@ -1703,7 +1738,22 @@ def _messages_to_text(value: Any) -> str:
     return str(value)
 
 
+def _last_user_message_text(value: Any) -> str:
+    if isinstance(value, list):
+        for item in reversed(value):
+            if isinstance(item, tuple) and len(item) > 1:
+                return str(item[1])
+    return str(value)
+
+
 def _json_from_messages(value: Any) -> dict[str, Any]:
+    if isinstance(value, list):
+        for item in reversed(value):
+            if isinstance(item, tuple) and len(item) > 1:
+                message_text = str(item[1]).strip()
+                if message_text.startswith("{") and message_text.endswith("}"):
+                    return json.loads(message_text)
+
     text = _messages_to_text(value)
     start = text.find("{")
     end = text.rfind("}")

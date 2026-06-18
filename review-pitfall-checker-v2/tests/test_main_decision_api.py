@@ -99,6 +99,81 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn("消费场景适配器", module.SCENARIO_ADAPTER_SYSTEM_PROMPT)
         self.assertIn("FITorNOT", module.GENERATOR_SYSTEM_PROMPT)
 
+    def test_local_intent_parser_detects_power_bank_from_chinese_input(self):
+        module = importlib.import_module("main")
+
+        slots = module.infer_intent_slots_locally("我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀")
+
+        self.assertEqual(slots.category, module.SUPPORTED_CATEGORIES[0])
+        self.assertEqual(slots.brand, "Anker")
+        self.assertEqual(slots.model, "10000")
+
+    def test_json_extractor_prefers_last_user_payload_over_prompt_examples(self):
+        module = importlib.import_module("main")
+
+        payload = module._json_from_messages(
+            [
+                (
+                    "system",
+                    '示例：{"ecommerce_query":"示例商品","xiaohongshu_queries":["示例 翻车","示例 真实评价"]}',
+                ),
+                (
+                    "user",
+                    '{"category":"充电宝","brand":"Anker","model":"10000","urls":[]}',
+                ),
+            ]
+        )
+
+        self.assertEqual(payload["category"], "充电宝")
+        self.assertEqual(payload["brand"], "Anker")
+        self.assertEqual(payload["model"], "10000")
+
+    def test_retriever_node_survives_prompt_examples_in_compat_mode(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+
+        async def fake_fetch_node(state):
+            state["raw_data"] = module.RawPlatformData(retrieval_plan=state["retrieval_plan"])
+            state["ecommerce_data"] = []
+            state["xiaohongshu_data"] = []
+            state["blocked_sources"] = []
+            state["fetch_status"] = "success"
+            return state
+
+        module.brightdata_mcp_fetch_node = fake_fetch_node
+
+        state = {
+            "user_raw_input": "我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+            "target_language": "中文",
+            "slots": slots,
+            "use_mock": False,
+        }
+
+        result = asyncio.run(module.retriever_node(state))
+
+        self.assertEqual(result["retrieval_plan"].ecommerce_query, "Anker 10000")
+        self.assertEqual(len(result["retrieval_plan"].xiaohongshu_queries), 2)
+
+    def test_planner_node_uses_user_text_in_compat_mode_without_prompt_pollution(self):
+        module = importlib.import_module("main")
+
+        state = {
+            "user_raw_input": "我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+            "target_language": "中文",
+            "use_mock": False,
+        }
+
+        result = asyncio.run(module.planner_node(state))
+
+        self.assertEqual(result["slots"].category, module.SUPPORTED_CATEGORIES[0])
+        self.assertEqual(result["slots"].brand, "Anker")
+        self.assertEqual(result["slots"].model, "10000")
+
     def test_decision_endpoint_uses_mock_fallback_without_network(self):
         module = importlib.import_module("main")
         request = module.DecisionRequest(
