@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
+
+DEFAULT_BROWSER_CHANNEL = "chrome"
+DEFAULT_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/137.0.0.0 Safari/537.36"
+)
+DEFAULT_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8"
+TAOBAO_RESPONSE_MARKER = "wirelessrecommend.recommend"
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -14,6 +24,189 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_browser_session_config() -> dict[str, Any]:
+    cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip()
+    channel = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip() or DEFAULT_BROWSER_CHANNEL
+    user_agent = os.getenv("FITORNOT_BROWSER_USER_AGENT", DEFAULT_BROWSER_USER_AGENT).strip() or DEFAULT_BROWSER_USER_AGENT
+    return {
+        "mode": "cdp" if cdp_url else "persistent",
+        "cdp_url": cdp_url or None,
+        "channel": channel,
+        "user_agent": user_agent,
+        "extra_http_headers": {"Accept-Language": DEFAULT_ACCEPT_LANGUAGE},
+    }
+
+
+def _strip_jsonp_wrapper(text: str) -> str:
+    stripped = text.strip().rstrip(";")
+    match = re.match(r"^[A-Za-z0-9_$]+\((.*)\)$", stripped, re.DOTALL)
+    return match.group(1).strip() if match else stripped
+
+
+def _extract_scalar(record: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = record.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {"null", "none"}:
+            return text
+    return ""
+
+
+def _normalize_candidate_url(url: str, item_id: str) -> str:
+    normalized = str(url or "").strip()
+    if normalized.startswith("//"):
+        normalized = f"https:{normalized}"
+    if normalized and normalized.startswith("/"):
+        normalized = f"https://s.taobao.com{normalized}"
+    if normalized:
+        return normalized
+
+    cleaned_id = re.sub(r"\D+", "", item_id or "")
+    if cleaned_id:
+        return f"https://item.taobao.com/item.htm?id={cleaned_id}"
+    return ""
+
+
+def _iter_nested_records(payload: Any) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    stack: list[Any] = [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            records.append(current)
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(reversed(current))
+    return records
+
+
+def parse_taobao_search_response(response_text: str, limit: int = 20) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(_strip_jsonp_wrapper(response_text))
+    except json.JSONDecodeError:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in _iter_nested_records(payload):
+        title = _extract_scalar(record, "title", "raw_title", "itemTitle", "auctionTitle", "name")
+        price = _extract_scalar(
+            record,
+            "price",
+            "salePrice",
+            "priceText",
+            "finalPrice",
+            "discountPrice",
+            "promotionPrice",
+        )
+        shop_name = _extract_scalar(record, "shopName", "nick", "sellerNick", "sellerName", "shop")
+        item_id = _extract_scalar(record, "itemId", "item_id", "auctionId", "auction_id", "nid", "num_iid")
+        url = _normalize_candidate_url(
+            _extract_scalar(record, "url", "itemUrl", "clickUrl", "auctionURL", "detailUrl", "targetUrl"),
+            item_id,
+        )
+        normalized_title = re.sub(r"\s+", " ", title).strip()
+        if len(normalized_title) < 4:
+            continue
+        if not any([price, shop_name, url]):
+            continue
+
+        dedupe_key = f"{normalized_title.lower()}|{url}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        candidates.append(
+            {
+                "title": normalized_title,
+                "price": price,
+                "shop_name": shop_name,
+                "url": url,
+                "platform": "taobao",
+            }
+        )
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def cap_xhs_hits(hits: list[dict[str, Any]], total_comment_limit: int = 20) -> list[dict[str, Any]]:
+    remaining = max(total_comment_limit, 0)
+    normalized: list[dict[str, Any]] = []
+    for hit in hits:
+        notes: list[dict[str, str]] = []
+        for note in hit.get("notes", []):
+            text = str(note.get("text") or note.get("content") or "").strip()
+            if text:
+                notes.append({"text": text[:500], "title": str(note.get("title", "")).strip()})
+
+        comments: list[dict[str, str]] = []
+        seen_comments: set[str] = set()
+        if remaining > 0:
+            for comment in hit.get("comments", []):
+                text = str(comment.get("text") if isinstance(comment, dict) else comment).strip()
+                normalized_comment = re.sub(r"\s+", " ", text)
+                if not normalized_comment:
+                    continue
+                dedupe_key = normalized_comment.lower()
+                if dedupe_key in seen_comments:
+                    continue
+                seen_comments.add(dedupe_key)
+                comments.append({"text": normalized_comment[:240]})
+                remaining -= 1
+                if remaining <= 0:
+                    break
+
+        if notes or comments:
+            normalized.append(
+                {
+                    "query": str(hit.get("query", "")).strip(),
+                    "url": str(hit.get("url", "")).strip(),
+                    "notes": notes,
+                    "comments": comments,
+                    "platform": str(hit.get("platform", "xiaohongshu")).strip() or "xiaohongshu",
+                }
+            )
+    return normalized
+
+
+def detect_platform_block_reason(
+    platform: str,
+    title: str,
+    body_text: str,
+    response_texts: list[str] | None = None,
+) -> str | None:
+    combined = "\n".join(part for part in [title, body_text, *(response_texts or [])] if part)
+    lowered = combined.lower()
+
+    if platform == "jd":
+        if (
+            ("京东登录" in combined)
+            or ("欢迎登录" in combined and "京东" in combined)
+            or ("个人用户登录" in combined and "手机扫码安全登录" in combined)
+            or ("获取验证码" in combined and "账号密码登录" in combined)
+        ):
+            return "JD search login required: use a trusted browser session."
+        return None
+
+    if platform in {"xiaohongshu", "xhs"}:
+        if "IP存在风险" in combined:
+            return "Xiaohongshu search is blocking the current network as risky."
+        if "登录后推荐更懂你的笔记" in combined or ("手机号登录" in combined and "小红书" in combined):
+            return "Xiaohongshu search login required: use a trusted browser session."
+        return None
+
+    if platform == "taobao":
+        if any(marker in lowered for marker in ("fail_sys_user_validate", "rgv587_error", "action=captcha", "purecaptcha")):
+            return "Taobao search captcha verification triggered; use a trusted browser session."
+        if "login.taobao.com" in lowered or ("亲，请登录" in combined and "加载中" in combined):
+            return "Taobao search login required: use a trusted browser session."
+        return None
+
+    return None
 
 
 class PlaywrightDomesticBrowserAdapter:
@@ -29,22 +222,59 @@ class PlaywrightDomesticBrowserAdapter:
         self.ecommerce_platforms = ecommerce_platforms
         self.timeout_ms = int(os.getenv("FITORNOT_BROWSER_TIMEOUT_MS", "45000"))
         self.scroll_rounds = int(os.getenv("FITORNOT_BROWSER_SCROLL_ROUNDS", "2"))
+        self.total_xhs_comment_limit = int(os.getenv("FITORNOT_XHS_TOTAL_COMMENT_LIMIT", "20"))
 
     async def fetch_ecommerce_candidates(self, query: str, category: str, limit: int = 20) -> list[dict[str, Any]]:
+        del category  # reserved for future platform-specific tuning
         if not query.strip():
             return []
 
         async with self._browser_context() as context:
             collected: list[dict[str, Any]] = []
+            blocked_reasons: list[str] = []
             for platform in self.ecommerce_platforms:
                 page = await context.new_page()
+                response_texts: list[str] = []
+                response_tasks: set[asyncio.Task[Any]] = set()
+
+                def _schedule_response_capture(response: Any) -> None:
+                    task = asyncio.create_task(self._capture_relevant_response_text(response, platform, response_texts))
+                    response_tasks.add(task)
+                    task.add_done_callback(response_tasks.discard)
+
+                page.on("response", _schedule_response_capture)
                 try:
                     await self._open_search_page(page, platform, query)
                     await self._lazy_scroll(page)
-                    collected.extend(await self._extract_ecommerce_candidates(page, platform, limit))
+                    await asyncio.sleep(1)
+                    page_candidates = await self._extract_ecommerce_candidates(page, platform, limit)
+                    if platform == "taobao":
+                        for response_text in response_texts:
+                            page_candidates.extend(parse_taobao_search_response(response_text, limit=limit))
+                        page_candidates = self._dedupe_candidates(page_candidates, limit)
+
+                    block_reason = detect_platform_block_reason(
+                        platform,
+                        await page.title(),
+                        await self._body_text(page),
+                        response_texts,
+                    )
+                    if block_reason and not page_candidates:
+                        blocked_reasons.append(block_reason)
+                        continue
+
+                    collected.extend(page_candidates)
                 finally:
+                    if response_tasks:
+                        await asyncio.gather(*response_tasks, return_exceptions=True)
                     await page.close()
-            return self._dedupe_candidates(collected, limit)
+
+            normalized = self._dedupe_candidates(collected, limit)
+            if normalized:
+                return normalized
+            if blocked_reasons:
+                raise RuntimeError("; ".join(blocked_reasons))
+            return []
 
     async def fetch_xiaohongshu_feedback(self, queries: list[str], limit: int = 10) -> list[dict[str, Any]]:
         cleaned_queries = [query.strip() for query in queries if query and query.strip()]
@@ -58,6 +288,14 @@ class PlaywrightDomesticBrowserAdapter:
                 search_page = await context.new_page()
                 try:
                     await self._open_xhs_search(search_page, query)
+                    block_reason = detect_platform_block_reason(
+                        "xiaohongshu",
+                        await search_page.title(),
+                        await self._body_text(search_page),
+                    )
+                    if block_reason:
+                        raise RuntimeError(block_reason)
+
                     await self._lazy_scroll(search_page, rounds=1)
                     note_summaries = await self._extract_xhs_search_results(search_page, per_query_limit)
                 finally:
@@ -73,6 +311,13 @@ class PlaywrightDomesticBrowserAdapter:
                         if not detail_url:
                             continue
                         await self._goto_and_wait(detail_page, detail_url)
+                        detail_block_reason = detect_platform_block_reason(
+                            "xiaohongshu",
+                            await detail_page.title(),
+                            await self._body_text(detail_page),
+                        )
+                        if detail_block_reason:
+                            continue
                         detail_payload = await self._extract_xhs_note_detail(detail_page)
                     finally:
                         await detail_page.close()
@@ -91,14 +336,14 @@ class PlaywrightDomesticBrowserAdapter:
                             "query": query,
                             "url": detail_url,
                             "notes": notes[:per_query_limit],
-                            "comments": comments[:20],
+                            "comments": comments,
                             "platform": "xiaohongshu",
                         }
                     )
 
                 if len(hits) >= limit:
                     break
-        return hits[:limit]
+        return cap_xhs_hits(hits[:limit], total_comment_limit=max(self.total_xhs_comment_limit, limit))
 
     @contextlib.asynccontextmanager
     async def _browser_context(self):
@@ -110,16 +355,35 @@ class PlaywrightDomesticBrowserAdapter:
                 "`playwright install chromium`."
             ) from exc
 
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        session_config = build_browser_session_config()
         async with async_playwright() as playwright:
+            if session_config["mode"] == "cdp":
+                browser = await playwright.chromium.connect_over_cdp(session_config["cdp_url"])
+                try:
+                    context = browser.contexts[0] if browser.contexts else await browser.new_context(
+                        locale="zh-CN",
+                        viewport={"width": 1440, "height": 1080},
+                        user_agent=session_config["user_agent"],
+                        extra_http_headers=session_config["extra_http_headers"],
+                    )
+                    yield context
+                finally:
+                    await browser.close()
+                return
+
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self.profile_dir),
                 headless=self.headless,
+                channel=session_config["channel"],
                 locale="zh-CN",
                 viewport={"width": 1440, "height": 1080},
+                user_agent=session_config["user_agent"],
+                extra_http_headers=session_config["extra_http_headers"],
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--start-maximized",
+                    "--lang=zh-CN",
                 ],
             )
             try:
@@ -152,6 +416,22 @@ class PlaywrightDomesticBrowserAdapter:
             await page.mouse.wheel(0, 1600)
             await asyncio.sleep(0.8)
 
+    async def _capture_relevant_response_text(
+        self,
+        response: Any,
+        platform: str,
+        response_texts: list[str],
+    ) -> None:
+        url = response.url.lower()
+        if platform == "taobao" and TAOBAO_RESPONSE_MARKER in url:
+            with contextlib.suppress(Exception):
+                response_texts.append(await response.text())
+
+    async def _body_text(self, page: Any) -> str:
+        with contextlib.suppress(Exception):
+            return await page.locator("body").inner_text(timeout=3000)
+        return ""
+
     async def _extract_ecommerce_candidates(self, page: Any, platform: str, limit: int) -> list[dict[str, Any]]:
         if platform == "jd":
             return await page.evaluate(
@@ -172,6 +452,8 @@ class PlaywrightDomesticBrowserAdapter:
         return await page.evaluate(
             """(limit) => {
                 const cardSelectors = [
+                    'a[href*="item.taobao.com"]',
+                    'a[href*="detail.tmall.com"]',
                     '[data-index]',
                     'div[class*="doubleCardWrapper"]',
                     'div[class*="Card--doubleCardWrapper"]',
@@ -183,10 +465,14 @@ class PlaywrightDomesticBrowserAdapter:
                     if (nodes.length) break;
                 }
                 return nodes.slice(0, limit).map((node) => {
-                    const anchor = node.querySelector('a[href*="item.taobao.com"], a[href*="detail.tmall.com"], a[href*="item.htm"]') || node.querySelector('a');
-                    const title = (node.querySelector('[class*="title"]')?.innerText || anchor?.innerText || '').replace(/\\s+/g, ' ').trim();
-                    const price = (node.querySelector('[class*="price"]')?.innerText || '').replace(/[^0-9.]/g, '').trim();
-                    const shop = (node.querySelector('[class*="shop"]')?.innerText || node.querySelector('[class*="seller"]')?.innerText || '').replace(/\\s+/g, ' ').trim();
+                    const anchor = node.tagName === 'A' ? node : (
+                        node.querySelector('a[href*="item.taobao.com"], a[href*="detail.tmall.com"], a[href*="item.htm"]')
+                        || node.querySelector('a')
+                    );
+                    const host = node.tagName === 'A' ? node.parentElement || node : node;
+                    const title = (host.querySelector('[class*="title"]')?.innerText || anchor?.innerText || '').replace(/\\s+/g, ' ').trim();
+                    const price = (host.querySelector('[class*="price"]')?.innerText || '').replace(/[^0-9.]/g, '').trim();
+                    const shop = (host.querySelector('[class*="shop"]')?.innerText || host.querySelector('[class*="seller"]')?.innerText || '').replace(/\\s+/g, ' ').trim();
                     const href = anchor?.href || '';
                     return { title, price, shop_name: shop, url: href, platform: 'taobao' };
                 }).filter((item) => item.title);
@@ -260,7 +546,8 @@ class PlaywrightDomesticBrowserAdapter:
             title = re.sub(r"\s+", " ", str(item.get("title", "")).strip())
             if not title:
                 continue
-            key = title.lower()
+            url = str(item.get("url", "")).strip()
+            key = f"{title.lower()}|{url}"
             if key in seen:
                 continue
             seen.add(key)
@@ -269,7 +556,7 @@ class PlaywrightDomesticBrowserAdapter:
                     "title": title,
                     "price": str(item.get("price", "")).strip(),
                     "shop_name": str(item.get("shop_name", "")).strip(),
-                    "url": str(item.get("url", "")).strip(),
+                    "url": url,
                     "platform": str(item.get("platform", "")).strip() or "search",
                 }
             )
