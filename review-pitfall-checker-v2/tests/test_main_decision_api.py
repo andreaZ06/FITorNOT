@@ -12,7 +12,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 class MainDecisionApiTest(unittest.TestCase):
     def setUp(self):
-        os.environ.setdefault("DEEPSEEK_API_KEY", "test-deepseek-key")
+        os.environ["DEEPSEEK_API_KEY"] = "test-deepseek-key"
+        os.environ.pop("FITORNOT_FORCE_COMPAT_LLM", None)
+        os.environ.pop("FITORNOT_ENABLE_BROWSER_AUTOMATION", None)
         sys.modules.pop("main", None)
 
     def tearDown(self):
@@ -71,6 +73,13 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(chat_llm.model_name, "deepseek-chat")
         self.assertEqual(reasoner_llm.model_name, "deepseek-reasoner")
         self.assertEqual(str(chat_llm.openai_api_base), "https://api.deepseek.com/v1")
+
+    def test_deepseek_llm_factory_uses_compat_client_for_test_api_key(self):
+        module = importlib.import_module("main")
+
+        chat_llm = module.build_deepseek_llm("deepseek-chat", temperature=0.0)
+
+        self.assertIsInstance(chat_llm, module._CompatChatOpenAI)
 
     def test_decision_graph_contains_required_nodes_and_edges(self):
         module = importlib.import_module("main")
@@ -815,6 +824,15 @@ class MainDecisionApiTest(unittest.TestCase):
             asyncio.run(module.fetch_ecommerce_candidates("Anker 10000", module.SUPPORTED_CATEGORIES[0], limit=20))
 
         self.assertIn("pip install playwright", str(ctx.exception))
+
+    def test_default_browser_adapter_requires_explicit_enable_flag(self):
+        module = importlib.import_module("main")
+        os.environ.pop("FITORNOT_ENABLE_BROWSER_AUTOMATION", None)
+        module.set_domestic_browser_adapter(None)
+
+        adapter = module.build_default_domestic_browser_adapter()
+
+        self.assertIsNone(adapter)
 
 
 if __name__ == "__main__":

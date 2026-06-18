@@ -491,7 +491,13 @@ def build_deepseek_llm(model: str, temperature: float = 0.0) -> Any:
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is required for DeepSeek calls.")
 
-    cls = _ChatOpenAI or _CompatChatOpenAI
+    use_compat = api_key == "test-deepseek-key" or os.getenv("FITORNOT_FORCE_COMPAT_LLM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cls = _CompatChatOpenAI if use_compat or _ChatOpenAI is None else _ChatOpenAI
     return cls(
         model=model,
         api_key=api_key,
@@ -830,7 +836,13 @@ async def create_decision(request: DecisionRequest, use_mock: bool | None = None
 _DOMESTIC_BROWSER_ADAPTER: Any = None
 
 
+def _browser_automation_enabled() -> bool:
+    return os.getenv("FITORNOT_ENABLE_BROWSER_AUTOMATION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_default_domestic_browser_adapter() -> Any:
+    if not _browser_automation_enabled():
+        return None
     if PlaywrightDomesticBrowserAdapter is None:
         return None
     return PlaywrightDomesticBrowserAdapter()
@@ -850,8 +862,9 @@ def get_domestic_browser_adapter() -> Any:
 
 def _browser_adapter_unavailable_error() -> RuntimeError:
     return RuntimeError(
-        "Playwright browser adapter is unavailable. Install it with `pip install playwright` and run "
-        "`playwright install chromium`."
+        "Playwright browser adapter is unavailable. Install it with `pip install playwright`, run "
+        "`playwright install chromium`, and set `FITORNOT_ENABLE_BROWSER_AUTOMATION=1` before using domestic "
+        "browser recall."
     )
 
 
