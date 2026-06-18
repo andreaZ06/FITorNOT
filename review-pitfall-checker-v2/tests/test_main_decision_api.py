@@ -1042,6 +1042,92 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertTrue(result.ecommerce_data)
         self.assertTrue(result.social_data)
 
+    def test_create_decision_skips_llm_hallucinations_when_all_sources_are_blocked(self):
+        module = importlib.import_module("main")
+
+        class FakeStructuredLLM:
+            def __init__(self, schema):
+                self.schema = schema
+
+            async def ainvoke(self, _messages):
+                if self.schema is module.IntentSlots:
+                    return module.IntentSlots(
+                        category=module.SUPPORTED_CATEGORIES[0],
+                        brand="Anker",
+                        model="10000",
+                        urls=[],
+                    )
+                if self.schema is module.RetrievalPlan:
+                    return module.RetrievalPlan(
+                        ecommerce_query="Anker 10000 充电宝",
+                        xiaohongshu_queries=["Anker 10000 充电宝 发热", "Anker 10000 充电宝 虚标"],
+                    )
+                if self.schema is module.CleanedFindings:
+                    return module.CleanedFindings(
+                        core_scandals=[
+                            module.RiskFinding(
+                                issue="发热严重",
+                                evidence="用户A: 磁吸充了十分钟烫得不敢手拿",
+                                source="跨平台一致",
+                            )
+                        ],
+                        soft_drawbacks=[],
+                        noise_rate={"ecommerce": "低", "xiaohongshu": "中"},
+                    )
+                if self.schema is module.ScenarioFit:
+                    return module.ScenarioFit(
+                        user_profile_extracted="用户关心飞机安检和便携性。",
+                        marketing_clash=None,
+                        suitability_analysis="模型声称可以带上飞机。",
+                    )
+                if self.schema is module.FinalReport:
+                    return module.FinalReport(
+                        report="## 假报告\n- 证据：用户A: 磁吸充了十分钟烫得不敢手拿"
+                    )
+                raise AssertionError(f"Unexpected schema: {self.schema}")
+
+        class FakeLLM:
+            def with_structured_output(self, schema):
+                return FakeStructuredLLM(schema)
+
+        async def fake_fetch_node(state):
+            retrieval_plan = state["retrieval_plan"]
+            state["raw_data"] = module.RawPlatformData(
+                retrieval_plan=retrieval_plan,
+                verified_specs={},
+                ecommerce_evidence=[],
+                xiaohongshu_evidence=[],
+                blocked_sources=[
+                    {"source": "domestic_ecommerce", "reason": "captcha blocked"},
+                    {"source": "xiaohongshu", "reason": "login required"},
+                ],
+            )
+            state["ecommerce_data"] = []
+            state["xiaohongshu_data"] = []
+            state["blocked_sources"] = list(state["raw_data"].blocked_sources)
+            state["risk_dictionary"] = module._fallback_risk_dictionary("power_bank")
+            state["fetch_status"] = "partial_failed"
+            return state
+
+        module.build_deepseek_llm = lambda model, temperature=0.0: FakeLLM()
+        module.brightdata_mcp_fetch_node = fake_fetch_node
+
+        result = asyncio.run(
+            module.create_decision(
+                module.DecisionRequest(
+                    user_raw_input="我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+                    target_language="zh-CN",
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertFalse(result.cleaned_findings.core_scandals)
+        self.assertFalse(result.cleaned_findings.soft_drawbacks)
+        self.assertIn("未抓取到", result.report)
+        self.assertNotIn("用户A", result.report)
+        self.assertTrue(result.blocked_sources)
+
     def test_brightdata_mcp_fetch_node_stays_on_domestic_path_when_domestic_fetch_fails(self):
         module = importlib.import_module("main")
         slots = module.IntentSlots(

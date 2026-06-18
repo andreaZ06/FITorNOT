@@ -8,6 +8,12 @@ from unittest.mock import patch
 
 
 class DomesticBrowserHelpersTest(unittest.TestCase):
+    def test_start_browser_script_honors_fitornot_browser_profile_dir_env_var(self):
+        script_path = Path(__file__).resolve().parents[1] / "start_fitornot_browser.ps1"
+        script_text = script_path.read_text(encoding="utf-8")
+
+        self.assertIn("FITORNOT_BROWSER_PROFILE_DIR", script_text)
+
     def test_build_browser_session_config_uses_explicit_profile_source_root(self):
         module = importlib.import_module("domestic_browser")
 

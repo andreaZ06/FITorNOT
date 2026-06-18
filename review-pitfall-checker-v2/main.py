@@ -831,6 +831,12 @@ async def retriever_node(state: DecisionState) -> DecisionState:
     return await brightdata_mcp_fetch_node(state)
 
 
+def _should_force_local_review(raw_data: RawPlatformData) -> bool:
+    return bool(raw_data.blocked_sources) and not (
+        raw_data.verified_specs or raw_data.ecommerce_evidence or raw_data.xiaohongshu_evidence
+    )
+
+
 async def analyzer_node(state: DecisionState) -> DecisionState:
     """Node 3: clean raw platform data and classify hard/soft risks."""
 
@@ -840,7 +846,7 @@ async def analyzer_node(state: DecisionState) -> DecisionState:
         xiaohongshu_data=list(state.get("xiaohongshu_data", [])),
         risk_dictionary=state.get("risk_dictionary"),
     )
-    if state.get("use_mock"):
+    if state.get("use_mock") or _should_force_local_review(payload.raw_data):
         findings = analyze_raw_data_locally(
             payload.raw_data,
             payload.ecommerce_data,
@@ -879,7 +885,7 @@ async def scenario_adapter_node(state: DecisionState) -> DecisionState:
         xiaohongshu_data=list(state.get("xiaohongshu_data", [])),
         risk_dictionary=state.get("risk_dictionary"),
     )
-    if state.get("use_mock"):
+    if state.get("use_mock") or _should_force_local_review(payload.raw_data):
         scenario_fit = adapt_scenario_locally(payload)
     else:
         llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
@@ -906,7 +912,7 @@ async def generator_node(state: DecisionState) -> DecisionState:
         cleaned_findings=state["cleaned_findings"],
         scenario_fit=state["scenario_fit"],
     )
-    if state.get("use_mock"):
+    if state.get("use_mock") or _should_force_local_review(payload.raw_data):
         final_report = FinalReport(report=render_report_locally(payload))
     else:
         llm = build_deepseek_llm("deepseek-reasoner", temperature=0.1)
@@ -1035,7 +1041,7 @@ def _trusted_session_bootstrap_hint() -> str:
     profile_dir = Path(getattr(adapter, "profile_dir", _browser_profile_dir()))
     launcher_script = Path(__file__).resolve().parent / "start_fitornot_browser.ps1"
     return (
-        f"Run {launcher_script} to open the FITorNOT browser profile at {profile_dir} and log in once, "
+        f"Run {launcher_script} -ProfileDir \"{profile_dir}\" to open the FITorNOT browser profile and log in once, "
         "or connect a trusted Chrome session via FITORNOT_BROWSER_CDP_URL."
     )
 
@@ -1912,6 +1918,16 @@ def adapt_scenario_locally(payload: ScenarioAdapterInput) -> ScenarioFit:
     else:
         profile = "用户没有给出足够细的场景，需要以跨平台硬伤作为主判断依据。"
 
+    if _should_force_local_review(payload.raw_data):
+        return ScenarioFit(
+            user_profile_extracted=profile,
+            marketing_clash=None,
+            suitability_analysis=(
+                "当前京东/淘宝/小红书抓取受阻，暂无可核验的跨平台证据。"
+                "对于“能不能上飞机”，需要等抓到实际商品页的 Wh 标注或实物铭牌后再确认。"
+            ),
+        )
+
     evidence_text = " ".join(item.text for item in payload.raw_data.ecommerce_evidence + payload.raw_data.xiaohongshu_evidence)
     clash = None
     if "轻薄" in evidence_text and any(term in evidence_text for term in ("重", "沉", "负担")):
@@ -2038,6 +2054,33 @@ def adapt_scenario_locally(payload: ScenarioAdapterInput) -> ScenarioFit:
 
 
 def render_report_locally(payload: GeneratorInput) -> str:
+    if _should_force_local_review(payload.raw_data):
+        product_name = " ".join(part for part in [payload.slots.brand, payload.slots.model, payload.slots.category] if part)
+        blocked_lines = "\n".join(
+            f"- `{item['source']}`: {item['reason']}" for item in payload.raw_data.blocked_sources
+        )
+        return f"""## 📌 商品全局意图图谱
+- **目标品类/型号**：{product_name or payload.slots.category}
+- **全网核心卖点**：未抓取到可核验的平台样本，当前不能确认真实卖点
+
+## 🔍 跨平台数据交叉验证表格
+| 平台数据源 | 样本噪点率 | 核心风向标 (用户都在夸什么/骂什么) |
+| :--- | :--- | :--- |
+| 小红书 (种草/玩法) | 中 | 未抓取到可靠样本 |
+| 电商平台 (价格/质量) | 中 | 未抓取到可靠样本 |
+
+## 🚫 避坑指南与风险分级
+- ⚡ **高危硬伤（买前必看）**：未抓取到有效电商追评和小红书评论，当前不能编造硬伤结论。 [证据链: 未抓取到有效样本]
+- ⚠️ **场景不匹配风险**：{payload.scenario_fit.suitability_analysis} [证据链: 抓取受阻，暂无可核验评论]
+
+## 💡 FITorNOT 最终决策建议
+- **购买指数**：⭐☆☆☆☆
+- **一句话结论**：先别买，等京东/淘宝/小红书登录与验证通过后再重新抓取一次。
+
+## ⛔ 当前抓取受阻
+{blocked_lines}
+"""
+
     specs = payload.raw_data.verified_specs or {"参数": "未抓取到可靠官方参数"}
     first_spec = next(iter(specs.items()))
     core = payload.cleaned_findings.core_scandals

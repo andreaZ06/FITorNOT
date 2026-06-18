@@ -1,11 +1,18 @@
 param(
-    [int]$Port = 9222
+    [int]$Port = 9222,
+    [string]$ProfileDir = ""
 )
 
 $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$profileDir = Join-Path $scriptRoot '.browser-profile'
+if (-not $ProfileDir) {
+    $ProfileDir = $env:FITORNOT_BROWSER_PROFILE_DIR
+}
+if (-not $ProfileDir) {
+    $ProfileDir = Join-Path $scriptRoot '.browser-profile'
+}
+$profileDir = [System.IO.Path]::GetFullPath($ProfileDir)
 $markerPath = Join-Path $profileDir 'cdp-url.txt'
 $cdpUrl = "http://127.0.0.1:$Port"
 
