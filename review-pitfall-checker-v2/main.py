@@ -19,6 +19,8 @@ from typing import Any, Awaitable, Callable, Literal, NotRequired, Optional, Typ
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from data_cleaning import clean_and_filter_data
+
 try:
     from langchain_openai import ChatOpenAI as _ChatOpenAI
 except Exception:  # pragma: no cover - local test fallback
@@ -855,14 +857,19 @@ async def _execute_brightdata_tool_calls(
         try:
             raw_result = await session.call_tool(tool_name, tool_arguments)
             normalized_result = _normalize_call_tool_result(raw_result)
+            cleaned_payload = clean_and_filter_data(
+                normalized_result,
+                platform=_platform_for_cleaning(task),
+                category=_category_for_cleaning(payload.slots.category),
+            )
             evidence_kind = "social" if task["kind"] == "xiaohongshu" else "ecommerce"
-            evidence = normalize_raw_evidence(normalized_result, evidence_kind)
+            evidence = _cleaned_payload_to_evidence(cleaned_payload, evidence_kind, task)
             record = {
                 "tool_name": tool_name,
                 "platform": task["platform"],
                 "url": task["url"],
                 "query": task["query"],
-                "payload": normalized_result,
+                "payload": cleaned_payload,
             }
             if task["kind"] == "xiaohongshu":
                 xiaohongshu_data.append(record)
@@ -870,6 +877,7 @@ async def _execute_brightdata_tool_calls(
             else:
                 ecommerce_data.append(record)
                 ecommerce_evidence.extend(evidence)
+                verified_specs.update(_spec_pairs_to_dict(cleaned_payload))
                 verified_specs.update(infer_specs_from_evidence(evidence))
         except Exception as exc:  # noqa: BLE001
             blocked_sources.append(
@@ -903,6 +911,81 @@ async def _execute_brightdata_tool_calls(
         blocked_sources=blocked_sources,
         fetch_status="partial_failed" if blocked_sources else "success",
     )
+
+
+def _platform_for_cleaning(task: dict[str, str]) -> str:
+    if task["kind"] == "xiaohongshu":
+        return "xhs"
+    if task["platform"] in {"jd", "taobao"}:
+        return task["platform"]
+    return "jd"
+
+
+def _category_for_cleaning(category: str) -> str:
+    if category == SUPPORTED_CATEGORIES[0]:
+        return "power_bank"
+    if category == SUPPORTED_CATEGORIES[1]:
+        return "facial_mask"
+    if category == SUPPORTED_CATEGORIES[2]:
+        return "dog_food"
+
+    lowered = str(category or "").lower()
+    if "mask" in lowered:
+        return "facial_mask"
+    if "dog" in lowered or "food" in lowered:
+        return "dog_food"
+    return "power_bank"
+
+
+def _cleaned_payload_to_evidence(
+    cleaned_payload: dict[str, Any], evidence_kind: str, task: dict[str, str]
+) -> list[EvidenceItem]:
+    evidence: list[EvidenceItem] = []
+    if evidence_kind == "ecommerce" and cleaned_payload.get("specs_text"):
+        evidence.append(
+            EvidenceItem(
+                source="官方参数",
+                text=cleaned_payload["specs_text"],
+                platform=task["platform"],
+                url=task["url"] or None,
+            )
+        )
+
+    if evidence_kind == "social":
+        for note in cleaned_payload.get("notes", []):
+            if note.get("text"):
+                evidence.append(
+                    EvidenceItem(
+                        source="小红书笔记",
+                        text=note["text"],
+                        platform=task["platform"],
+                        url=task["url"] or None,
+                    )
+                )
+
+    comment_source = "小红书真实评论" if evidence_kind == "social" else "电商追评"
+    for comment in cleaned_payload.get("comments", []):
+        if comment.get("text"):
+            evidence.append(
+                EvidenceItem(
+                    source=comment_source,
+                    text=comment["text"],
+                    platform=task["platform"],
+                    url=task["url"] or None,
+                )
+            )
+    return evidence
+
+
+def _spec_pairs_to_dict(cleaned_payload: dict[str, Any]) -> dict[str, Any]:
+    specs: dict[str, Any] = {}
+    for pair in cleaned_payload.get("specs_pairs", []):
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            key = str(pair[0]).strip()
+            value = str(pair[1]).strip()
+            if key and value:
+                specs[key] = value
+    return specs
 
 
 def _match_task_for_call(tool_arguments: dict[str, Any], tasks: list[dict[str, str]]) -> dict[str, str]:
