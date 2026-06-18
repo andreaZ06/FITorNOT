@@ -429,5 +429,162 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertNotIn("系统默认好评", " ".join(item.text for item in result["raw_data"].ecommerce_evidence))
 
 
+    def test_load_risk_dictionary_prefers_neon_rows_when_available(self):
+        module = importlib.import_module("main")
+        os.environ["NEON_DATABASE_URL"] = "postgresql://neon.example/db"
+        captured = {}
+
+        class FakeConnection:
+            async def fetch(self, query, category):
+                captured["query"] = query
+                captured["category"] = category
+                return [
+                    {"term": "overheat", "risk_level": "critical"},
+                    {"term": "flight banned", "risk_level": "veto"},
+                    {"term": "heavy", "risk_level": "soft"},
+                ]
+
+            async def close(self):
+                captured["closed"] = True
+
+        class FakeAsyncpg:
+            @staticmethod
+            async def connect(dsn, timeout=None):
+                captured["dsn"] = dsn
+                captured["timeout"] = timeout
+                return FakeConnection()
+
+        module.asyncpg = FakeAsyncpg
+
+        result = asyncio.run(module.load_risk_dictionary("power_bank"))
+
+        self.assertEqual(captured["dsn"], "postgresql://neon.example/db")
+        self.assertEqual(captured["category"], "power_bank")
+        self.assertTrue(captured["closed"])
+        self.assertEqual(result.source, "neon")
+        self.assertIn("overheat", result.critical_terms)
+        self.assertIn("flight banned", result.veto_terms)
+        self.assertIn("heavy", result.soft_terms)
+
+    def test_brightdata_fetch_writes_risk_dictionary_hits_back_to_state(self):
+        module = importlib.import_module("main")
+        os.environ["BRIGHTDATA_API_KEY"] = "brightdata-test-key"
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="A1647",
+            urls=["https://item.jd.com/1.html"],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_load_risk_dictionary(category_key):
+            self.assertEqual(category_key, "power_bank")
+            return module.RiskDictionary(
+                category_key=category_key,
+                critical_terms=["overheat"],
+                veto_terms=["flight banned"],
+                soft_terms=["heavy"],
+                source="neon",
+            )
+
+        class FakeTool:
+            def __init__(self, name, description, input_schema):
+                self.name = name
+                self.description = description
+                self.inputSchema = input_schema
+
+        class FakeBoundLLM:
+            async def ainvoke(self, _messages):
+                return type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "tool_calls": [
+                            {"name": "brightdata__scrape", "args": {"url": slots.urls[0]}},
+                            {
+                                "name": "brightdata__scrape",
+                                "args": {"query": retrieval_plan.xiaohongshu_queries[0]},
+                            },
+                        ]
+                    },
+                )()
+
+        class FakeLLM:
+            def bind_tools(self, _tools):
+                return FakeBoundLLM()
+
+        class FakeServerParameters:
+            def __init__(self, command, args, env=None):
+                self.command = command
+                self.args = args
+                self.env = env or {}
+
+        class FakeClientSession:
+            def __init__(self, _read_stream, _write_stream):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def initialize(self):
+                return None
+
+            async def list_tools(self):
+                return [
+                    FakeTool(
+                        "brightdata__scrape",
+                        "Scrape a public page by url or query",
+                        {"type": "object", "properties": {"url": {"type": "string"}, "query": {"type": "string"}}},
+                    )
+                ]
+
+            async def call_tool(self, _tool_name, tool_arguments):
+                if tool_arguments.get("url"):
+                    return {
+                        "specs_html": "<div>capacity: 20000mAh</div>",
+                        "reviews": [{"text": "follow-up: overheat and flight banned on airline"}],
+                    }
+                return {
+                    "notes": [
+                        {
+                            "content": "Real travel use note",
+                            "top_comments": ["heavy but usable", "flight banned at check-in"],
+                        }
+                    ]
+                }
+
+        class FakeStdioClient:
+            async def __aenter__(self):
+                return ("read_stream", "write_stream")
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        module.load_risk_dictionary = fake_load_risk_dictionary
+        module.StdioServerParameters = FakeServerParameters
+        module.ClientSession = FakeClientSession
+        module.stdio_client = lambda _server_params: FakeStdioClient()
+        module.build_deepseek_llm = lambda model, temperature=0.0: FakeLLM()
+
+        state = {
+            "user_raw_input": "Need a flight-safe power bank.",
+            "target_language": "English",
+            "slots": slots,
+            "retrieval_plan": retrieval_plan,
+            "user_bound_urls": list(slots.urls),
+            "generated_xhs_queries": list(retrieval_plan.xiaohongshu_queries),
+        }
+
+        result = asyncio.run(module.brightdata_mcp_fetch_node(state))
+
+        self.assertEqual(result["risk_dictionary"].source, "neon")
+        self.assertIn("flight banned", result["ecommerce_data"][0]["payload"]["matched_veto_terms"])
+        self.assertIn("heavy", result["xiaohongshu_data"][0]["payload"]["matched_soft_terms"])
+        self.assertTrue(result["ecommerce_data"][0]["payload"]["comments"][0]["is_critical_issue"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,17 +9,20 @@ without network credentials.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
+import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, NotRequired, Optional, TypedDict
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from data_cleaning import clean_and_filter_data
+from data_cleaning import clean_and_filter_data as _base_clean_and_filter_data
 
 try:
     from langchain_openai import ChatOpenAI as _ChatOpenAI
@@ -39,6 +42,11 @@ try:
 except Exception:  # pragma: no cover - local test fallback
     END = "__end__"
     _StateGraph = None
+
+try:
+    import asyncpg
+except Exception:  # pragma: no cover - optional runtime dependency
+    asyncpg = None
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
@@ -183,6 +191,14 @@ class RawPlatformData(BaseModel):
     blocked_sources: list[dict[str, str]] = Field(default_factory=list)
 
 
+class RiskDictionary(BaseModel):
+    category_key: str
+    critical_terms: list[str] = Field(default_factory=list)
+    veto_terms: list[str] = Field(default_factory=list)
+    soft_terms: list[str] = Field(default_factory=list)
+    source: Literal["fallback", "neon"] = "fallback"
+
+
 class RiskFinding(BaseModel):
     issue: str = Field(..., min_length=1)
     evidence: str = Field(..., min_length=1)
@@ -228,11 +244,15 @@ class BrightDataFetchOutput(BaseModel):
     ecommerce_data: list[dict[str, Any]] = Field(default_factory=list)
     xiaohongshu_data: list[dict[str, Any]] = Field(default_factory=list)
     blocked_sources: list[dict[str, str]] = Field(default_factory=list)
+    risk_dictionary: RiskDictionary | None = None
     fetch_status: str = "success"
 
 
 class AnalyzerInput(BaseModel):
     raw_data: RawPlatformData
+    ecommerce_data: list[dict[str, Any]] = Field(default_factory=list)
+    xiaohongshu_data: list[dict[str, Any]] = Field(default_factory=list)
+    risk_dictionary: RiskDictionary | None = None
 
 
 class ScenarioAdapterInput(BaseModel):
@@ -240,6 +260,9 @@ class ScenarioAdapterInput(BaseModel):
     slots: IntentSlots
     raw_data: RawPlatformData
     cleaned_findings: CleanedFindings
+    ecommerce_data: list[dict[str, Any]] = Field(default_factory=list)
+    xiaohongshu_data: list[dict[str, Any]] = Field(default_factory=list)
+    risk_dictionary: RiskDictionary | None = None
 
 
 class GeneratorInput(BaseModel):
@@ -281,6 +304,7 @@ class DecisionState(TypedDict):
     ecommerce_data: NotRequired[list[dict[str, Any]]]
     xiaohongshu_data: NotRequired[list[dict[str, Any]]]
     blocked_sources: NotRequired[list[dict[str, str]]]
+    risk_dictionary: NotRequired[RiskDictionary]
     fetch_status: NotRequired[str]
     cleaned_findings: NotRequired[CleanedFindings]
     scenario_fit: NotRequired[ScenarioFit]
@@ -410,6 +434,33 @@ class _CompatStateGraph:
 
 StateGraph = _StateGraph or _CompatStateGraph
 LOGGER = logging.getLogger("fitornot.brightdata")
+RISK_TERMS_CONTEXT: ContextVar[dict[str, tuple[str, ...]]] = ContextVar("fitornot_risk_terms", default={})
+RISK_DICTIONARY_CACHE: dict[str, tuple[float, "RiskDictionary"]] = {}
+DEFAULT_RISK_DICTIONARIES: dict[str, dict[str, list[str]]] = {
+    "power_bank": {
+        "critical_terms": ["发热", "烫", "断连", "鼓包", "虚标", "降功率", "overheat", "disconnect"],
+        "veto_terms": ["额定能量超标", "无3C", "带不上飞机", "安检被拦", "flight banned", "security rejected"],
+        "soft_terms": ["太重", "沉", "放不下", "heavy", "bulky"],
+    },
+    "facial_mask": {
+        "critical_terms": ["刺痛", "过敏", "发红", "爆痘", "红肿", "stinging", "allergy"],
+        "veto_terms": ["烂脸", "屏障受损", "辣眼睛", "barrier damage"],
+        "soft_terms": ["不服帖", "太香", "闷", "slippery", "fragrance"],
+    },
+    "dog_food": {
+        "critical_terms": ["软便", "拉稀", "血便", "吐", "soft stool", "diarrhea"],
+        "veto_terms": ["不吃", "拒食", "black stool", "refuse to eat"],
+        "soft_terms": ["颗粒大", "适口性一般", "口味挑", "large kibble", "picky eater"],
+    },
+}
+DEFAULT_NEON_VETO_QUERY = """
+SELECT
+    term,
+    COALESCE(risk_level, severity, 'critical') AS risk_level
+FROM fitornot_veto_dictionary
+WHERE category = $1
+  AND COALESCE(enabled, TRUE) = TRUE
+"""
 
 
 def build_deepseek_llm(model: str, temperature: float = 0.0) -> Any:
@@ -424,6 +475,137 @@ def build_deepseek_llm(model: str, temperature: float = 0.0) -> Any:
         base_url=DEEPSEEK_BASE_URL,
         temperature=temperature,
     )
+
+
+def _fallback_risk_dictionary(category_key: str) -> RiskDictionary:
+    payload = DEFAULT_RISK_DICTIONARIES.get(category_key, {})
+    return RiskDictionary(
+        category_key=category_key,
+        critical_terms=list(payload.get("critical_terms", [])),
+        veto_terms=list(payload.get("veto_terms", [])),
+        soft_terms=list(payload.get("soft_terms", [])),
+        source="fallback",
+    )
+
+
+async def load_risk_dictionary(category_key: str) -> RiskDictionary:
+    normalized_category = category_key or "power_bank"
+    cache_ttl = int(os.getenv("NEON_VETO_CACHE_TTL_SECONDS", "300"))
+    now = time.time()
+    cached = RISK_DICTIONARY_CACHE.get(normalized_category)
+    if cached and now - cached[0] < cache_ttl:
+        return cached[1]
+
+    fallback = _fallback_risk_dictionary(normalized_category)
+    database_url = os.getenv("NEON_DATABASE_URL")
+    if not database_url or asyncpg is None:
+        RISK_DICTIONARY_CACHE[normalized_category] = (now, fallback)
+        return fallback
+
+    query = os.getenv("NEON_VETO_QUERY", DEFAULT_NEON_VETO_QUERY)
+    connection = None
+    try:
+        connection = await asyncpg.connect(database_url, timeout=10)
+        rows = await connection.fetch(query, normalized_category)
+        risk_dictionary = _merge_risk_dictionary_rows(normalized_category, rows, fallback)
+        RISK_DICTIONARY_CACHE[normalized_category] = (now, risk_dictionary)
+        return risk_dictionary
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to load Neon risk dictionary for %s: %s", normalized_category, exc)
+        RISK_DICTIONARY_CACHE[normalized_category] = (now, fallback)
+        return fallback
+    finally:
+        if connection is not None:
+            await connection.close()
+
+
+def _merge_risk_dictionary_rows(
+    category_key: str,
+    rows: list[Any],
+    fallback: RiskDictionary,
+) -> RiskDictionary:
+    if not rows:
+        return fallback
+
+    critical_terms = list(fallback.critical_terms)
+    veto_terms = list(fallback.veto_terms)
+    soft_terms = list(fallback.soft_terms)
+    seen = {term.lower() for term in critical_terms + veto_terms + soft_terms}
+
+    for row in rows:
+        record = dict(row) if not isinstance(row, dict) else row
+        term = str(record.get("term", "")).strip()
+        if not term or term.lower() in seen:
+            continue
+        risk_level = str(record.get("risk_level", record.get("severity", "critical"))).lower().strip()
+        if risk_level in {"veto", "one_vote_veto", "one-vote-veto", "blocker"}:
+            veto_terms.append(term)
+        elif risk_level in {"soft", "preference", "warning"}:
+            soft_terms.append(term)
+        else:
+            critical_terms.append(term)
+        seen.add(term.lower())
+
+    return RiskDictionary(
+        category_key=category_key,
+        critical_terms=critical_terms,
+        veto_terms=veto_terms,
+        soft_terms=soft_terms,
+        source="neon",
+    )
+
+
+@contextlib.contextmanager
+def _risk_terms_scope(category_key: str, risk_dictionary: RiskDictionary | None):
+    if risk_dictionary is None:
+        yield
+        return
+
+    current = dict(RISK_TERMS_CONTEXT.get())
+    current[category_key] = tuple(risk_dictionary.critical_terms)
+    token = RISK_TERMS_CONTEXT.set(current)
+    try:
+        yield
+    finally:
+        RISK_TERMS_CONTEXT.reset(token)
+
+
+def _match_terms_in_payload(cleaned_payload: dict[str, Any], terms: list[str]) -> list[str]:
+    if not terms:
+        return []
+
+    haystacks: list[str] = []
+    if cleaned_payload.get("specs_text"):
+        haystacks.append(str(cleaned_payload["specs_text"]))
+    haystacks.extend(str(note.get("text", "")) for note in cleaned_payload.get("notes", []))
+    haystacks.extend(str(comment.get("text", "")) for comment in cleaned_payload.get("comments", []))
+    combined = "\n".join(text for text in haystacks if text)
+
+    matches: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        lowered = term.lower()
+        if lowered in seen:
+            continue
+        if term and (term in combined or lowered in combined.lower()):
+            matches.append(term)
+            seen.add(lowered)
+    return matches
+
+
+def clean_and_filter_data(raw_data: dict, platform: str, category: str) -> dict:
+    cleaned_payload = _base_clean_and_filter_data(raw_data, platform, category)
+    override_terms = RISK_TERMS_CONTEXT.get().get(str(category), ())
+    if not override_terms:
+        return cleaned_payload
+
+    for comment in cleaned_payload.get("comments", []):
+        text = str(comment.get("text", ""))
+        lowered = text.lower()
+        comment["is_critical_issue"] = any(
+            term and (term in text or term.lower() in lowered) for term in override_terms
+        )
+    return cleaned_payload
 
 
 async def planner_node(state: DecisionState) -> DecisionState:
@@ -478,9 +660,19 @@ async def retriever_node(state: DecisionState) -> DecisionState:
 async def analyzer_node(state: DecisionState) -> DecisionState:
     """Node 3: clean raw platform data and classify hard/soft risks."""
 
-    payload = AnalyzerInput(raw_data=state["raw_data"])
+    payload = AnalyzerInput(
+        raw_data=state["raw_data"],
+        ecommerce_data=list(state.get("ecommerce_data", [])),
+        xiaohongshu_data=list(state.get("xiaohongshu_data", [])),
+        risk_dictionary=state.get("risk_dictionary"),
+    )
     if state.get("use_mock"):
-        findings = analyze_raw_data_locally(payload.raw_data)
+        findings = analyze_raw_data_locally(
+            payload.raw_data,
+            payload.ecommerce_data,
+            payload.xiaohongshu_data,
+            payload.risk_dictionary,
+        )
     else:
         llm = build_deepseek_llm("deepseek-chat", temperature=0.0)
         structured_llm = llm.with_structured_output(CleanedFindings)
@@ -502,6 +694,9 @@ async def scenario_adapter_node(state: DecisionState) -> DecisionState:
         slots=state["slots"],
         raw_data=state["raw_data"],
         cleaned_findings=state["cleaned_findings"],
+        ecommerce_data=list(state.get("ecommerce_data", [])),
+        xiaohongshu_data=list(state.get("xiaohongshu_data", [])),
+        risk_dictionary=state.get("risk_dictionary"),
     )
     if state.get("use_mock"):
         scenario_fit = adapt_scenario_locally(payload)
@@ -613,9 +808,10 @@ async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
         ),
         use_mock=bool(state.get("use_mock")),
     )
+    risk_dictionary = await load_risk_dictionary(_category_for_cleaning(payload.slots.category))
 
     if payload.use_mock:
-        output = _build_mock_fetch_output(payload)
+        output = _build_mock_fetch_output(payload, risk_dictionary=risk_dictionary)
     else:
         try:
             if ClientSession is None or StdioServerParameters is None or stdio_client is None:
@@ -643,15 +839,27 @@ async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
                     if not tool_calls:
                         tool_calls = _build_fallback_tool_calls(_preferred_tool_name(tool_schemas), tasks)
 
-                    output = await _execute_brightdata_tool_calls(session, payload, tasks, tool_calls)
+                    output = await _execute_brightdata_tool_calls(
+                        session,
+                        payload,
+                        tasks,
+                        tool_calls,
+                        risk_dictionary,
+                    )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Bright Data MCP fetch failed: %s", exc)
-            output = _build_mock_fetch_output(payload, reason=str(exc), allow_synthetic_payload=False)
+            output = _build_mock_fetch_output(
+                payload,
+                reason=str(exc),
+                allow_synthetic_payload=False,
+                risk_dictionary=risk_dictionary,
+            )
 
     state["raw_data"] = output.raw_data
     state["ecommerce_data"] = output.ecommerce_data
     state["xiaohongshu_data"] = output.xiaohongshu_data
     state["blocked_sources"] = output.blocked_sources
+    state["risk_dictionary"] = output.risk_dictionary or risk_dictionary
     state["fetch_status"] = output.fetch_status
     return state
 
@@ -694,6 +902,7 @@ def _build_mock_fetch_output(
     reason: str | None = None,
     allow_synthetic_payload: bool = True,
     blocked_sources: list[dict[str, str]] | None = None,
+    risk_dictionary: RiskDictionary | None = None,
 ) -> BrightDataFetchOutput:
     if allow_synthetic_payload:
         raw_data = mock_raw_platform_data(payload.slots, payload.retrieval_plan)
@@ -710,6 +919,7 @@ def _build_mock_fetch_output(
         ecommerce_data=ecommerce_data,
         xiaohongshu_data=xiaohongshu_data,
         blocked_sources=raw_data.blocked_sources,
+        risk_dictionary=risk_dictionary,
         fetch_status="success" if allow_synthetic_payload and not reason else "partial_failed",
     )
 
@@ -842,6 +1052,7 @@ async def _execute_brightdata_tool_calls(
     payload: BrightDataFetchInput,
     tasks: list[dict[str, str]],
     tool_calls: list[dict[str, Any]],
+    risk_dictionary: RiskDictionary | None = None,
 ) -> BrightDataFetchOutput:
     blocked_sources: list[dict[str, str]] = []
     ecommerce_evidence: list[EvidenceItem] = []
@@ -857,11 +1068,23 @@ async def _execute_brightdata_tool_calls(
         try:
             raw_result = await session.call_tool(tool_name, tool_arguments)
             normalized_result = _normalize_call_tool_result(raw_result)
-            cleaned_payload = clean_and_filter_data(
-                normalized_result,
-                platform=_platform_for_cleaning(task),
-                category=_category_for_cleaning(payload.slots.category),
-            )
+            category_key = _category_for_cleaning(payload.slots.category)
+            with _risk_terms_scope(category_key, risk_dictionary):
+                cleaned_payload = clean_and_filter_data(
+                    normalized_result,
+                    platform=_platform_for_cleaning(task),
+                    category=category_key,
+                )
+            if risk_dictionary is not None:
+                cleaned_payload["matched_veto_terms"] = _match_terms_in_payload(
+                    cleaned_payload,
+                    risk_dictionary.veto_terms,
+                )
+                cleaned_payload["matched_soft_terms"] = _match_terms_in_payload(
+                    cleaned_payload,
+                    risk_dictionary.soft_terms,
+                )
+                cleaned_payload["risk_dictionary_source"] = risk_dictionary.source
             evidence_kind = "social" if task["kind"] == "xiaohongshu" else "ecommerce"
             evidence = _cleaned_payload_to_evidence(cleaned_payload, evidence_kind, task)
             record = {
@@ -895,6 +1118,7 @@ async def _execute_brightdata_tool_calls(
             reason=reason if not blocked_sources else None,
             allow_synthetic_payload=False,
             blocked_sources=blocked_sources,
+            risk_dictionary=risk_dictionary,
         )
 
     raw_data = RawPlatformData(
@@ -909,6 +1133,7 @@ async def _execute_brightdata_tool_calls(
         ecommerce_data=ecommerce_data,
         xiaohongshu_data=xiaohongshu_data,
         blocked_sources=blocked_sources,
+        risk_dictionary=risk_dictionary,
         fetch_status="partial_failed" if blocked_sources else "success",
     )
 
@@ -1206,6 +1431,114 @@ def adapt_scenario_locally(payload: ScenarioAdapterInput) -> ScenarioFit:
     )
 
 
+def _estimate_noise_bucket(platform_payloads: list[dict[str, Any]]) -> str:
+    if not platform_payloads:
+        return "\u4e2d"
+
+    rates: list[float] = []
+    for payload in platform_payloads:
+        rate = payload.get("payload", {}).get("noise_rate_estimate")
+        if isinstance(rate, (int, float)):
+            rates.append(float(rate))
+
+    if not rates:
+        return "\u4e2d"
+
+    average = sum(rates) / len(rates)
+    if average >= 0.5:
+        return "\u9ad8"
+    if average >= 0.2:
+        return "\u4e2d"
+    return "\u4f4e"
+
+
+def infer_category_key_from_raw_data(raw_data: RawPlatformData) -> str:
+    specs_blob = " ".join(f"{key}:{value}" for key, value in raw_data.verified_specs.items())
+    evidence_blob = " ".join(item.text for item in raw_data.ecommerce_evidence + raw_data.xiaohongshu_evidence)
+    corpus = f"{raw_data.retrieval_plan.ecommerce_query} {specs_blob} {evidence_blob}".lower()
+    if any(token in corpus for token in ("mask", "闈㈣啘", "鍒虹棝", "杩囨晱")):
+        return "facial_mask"
+    if any(token in corpus for token in ("dog", "鐙楃伯", "鎷夌█", "杞究")):
+        return "dog_food"
+    return "power_bank"
+
+
+def collect_veto_hits(
+    ecommerce_data: list[dict[str, Any]] | None,
+    xiaohongshu_data: list[dict[str, Any]] | None,
+) -> list[str]:
+    hits: list[str] = []
+    seen: set[str] = set()
+    for record in (ecommerce_data or []) + (xiaohongshu_data or []):
+        for term in record.get("payload", {}).get("matched_veto_terms", []):
+            lowered = str(term).lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            hits.append(str(term))
+    return hits
+
+
+def analyze_raw_data_locally(
+    raw_data: RawPlatformData,
+    ecommerce_data: list[dict[str, Any]] | None = None,
+    xiaohongshu_data: list[dict[str, Any]] | None = None,
+    risk_dictionary: RiskDictionary | None = None,
+) -> CleanedFindings:
+    category_key = infer_category_key_from_raw_data(raw_data)
+    active_dictionary = risk_dictionary or _fallback_risk_dictionary(category_key)
+    core_terms = tuple(active_dictionary.critical_terms + active_dictionary.veto_terms)
+    soft_terms = tuple(active_dictionary.soft_terms)
+    all_items = raw_data.ecommerce_evidence + raw_data.xiaohongshu_evidence
+    core: list[RiskFinding] = []
+    soft: list[RiskFinding] = []
+    for item in all_items:
+        item_text_lower = item.text.lower()
+        if any(term and (term in item.text or term.lower() in item_text_lower) for term in core_terms):
+            core.append(RiskFinding(issue=summarize_issue(item.text), evidence=item.text, source=item.source))
+        elif any(term and (term in item.text or term.lower() in item_text_lower) for term in soft_terms):
+            soft.append(RiskFinding(issue=summarize_issue(item.text), evidence=item.text, source=item.source))
+    return CleanedFindings(
+        core_scandals=dedupe_findings(core),
+        soft_drawbacks=dedupe_findings(soft),
+        noise_rate={
+            "xiaohongshu": _estimate_noise_bucket(xiaohongshu_data or []),
+            "ecommerce": _estimate_noise_bucket(ecommerce_data or []),
+        },
+    )
+
+
+def adapt_scenario_locally(payload: ScenarioAdapterInput) -> ScenarioFit:
+    text = payload.user_raw_input
+    if "椋炴満" in text or "瀹夋" in text or "鍑哄樊" in text:
+        profile = "鐢ㄦ埛鏍稿績鍦烘櫙鏄粡甯稿潗椋炴満/鍑哄樊锛屽叧娉ㄥ畨妫€銆乄h 鏍囨敞銆佸彂鐑拰闅忚韩鎼哄甫瀹夊叏銆?"
+    elif "鏁忔劅" in text or "娌圭毊" in text:
+        profile = "鐢ㄦ埛鏍稿績鍦烘櫙鏄晱鎰熻倢/鐗瑰畾鑲よ川锛屽叧娉ㄥ埡鐥涖€佽繃鏁忋€侀椃鐥樼瓑涓€绁ㄥ惁鍐抽闄┿€?"
+    elif "娉棔" in text or "鐙?" in text:
+        profile = "鐢ㄦ埛鏍稿績鍦烘櫙鏄疇鐗╂唱鐥曠鐞嗭紝鍏虫敞杞究銆佹媺绋€銆佷笉鍚冨拰闀挎湡閫傚簲鎬с€?"
+    else:
+        profile = "鐢ㄦ埛娌℃湁缁欏嚭瓒冲缁嗙殑鍦烘櫙锛岄渶瑕佷互璺ㄥ钩鍙扮‖浼や綔涓轰富鍒ゆ柇渚濇嵁銆?"
+
+    evidence_text = " ".join(item.text for item in payload.raw_data.ecommerce_evidence + payload.raw_data.xiaohongshu_evidence)
+    clash = None
+    if "杞昏杽" in evidence_text and any(term in evidence_text for term in ("閲?", "娌?", "璐熸媴", "heavy")):
+        clash = "瀹樻柟/鍟嗗杞昏杽鍙欎簨涓庣湡瀹炵敤鎴峰弽棣堢殑閲嶉噺璐熸媴鍐茬獊銆?"
+    elif "鎻愪寒" in evidence_text and any(term in evidence_text for term in ("鍒虹棝", "娉涚孩", "鐖嗙棙")):
+        clash = "鍔熸晥鍨嬫彁浜崠鐐逛笌鐪熷疄鍒烘縺鍙嶉鍐茬獊銆?"
+    elif "娉棔" in evidence_text and any(term in evidence_text for term in ("杞究", "鎷夌█")):
+        clash = "娉棔绠＄悊鍗栫偣涓庤偁鑳冮€傚簲椋庨櫓鍐茬獊銆?"
+
+    veto_hits = collect_veto_hits(payload.ecommerce_data, payload.xiaohongshu_data)
+    hard_risks = "锛?".join(finding.issue for finding in payload.cleaned_findings.core_scandals) or "鏆傛湭鍙戠幇鏍稿績纭激"
+    if veto_hits:
+        hard_risks = f"{hard_risks}锛屽凡鍛戒腑涓€绁ㄥ惁鍐宠鍒?{' / '.join(veto_hits)}"
+    return ScenarioFit(
+        user_profile_extracted=profile,
+        marketing_clash=clash,
+        suitability_analysis=f"璇ュ晢鍝佸璇ョ敤鎴风殑鍏抽敭椋庨櫓鏄細{hard_risks}銆傚鏋滆繖浜涢闄╁懡涓牳蹇冨満鏅紝搴斾紭鍏堝姖閫€銆?",
+    )
+
+
 def render_report_locally(payload: GeneratorInput) -> str:
     specs = payload.raw_data.verified_specs or {"参数": "未抓取到可靠官方参数"}
     first_spec = next(iter(specs.items()))
@@ -1243,6 +1576,31 @@ def summarize_issue(text: str) -> str:
     return text[:18]
 
 
+def summarize_issue(text: str) -> str:
+    canonical_terms = (
+        "鍙戠儹",
+        "铏氭爣",
+        "闄嶅姛鐜?",
+        "鍒虹棝",
+        "杩囨晱",
+        "闂风棙",
+        "杞究",
+        "鎷夌█",
+        "涓嶅悆",
+        "澶噸",
+        "娌?",
+        "overheat",
+        "flight banned",
+        "security rejected",
+        "heavy",
+    )
+    lowered = text.lower()
+    for term in canonical_terms:
+        if term in text or term.lower() in lowered:
+            return f"{term}椋庨櫓"
+    return text[:18]
+
+
 def dedupe_findings(items: list[RiskFinding]) -> list[RiskFinding]:
     seen: set[str] = set()
     result: list[RiskFinding] = []
@@ -1256,6 +1614,87 @@ def dedupe_findings(items: list[RiskFinding]) -> list[RiskFinding]:
 
 def first_text(items: list[EvidenceItem]) -> str:
     return items[0].text if items else "暂无可靠样本"
+
+
+def summarize_issue(text: str) -> str:
+    canonical_terms = (
+        "\u53d1\u70ed",
+        "\u865a\u6807",
+        "\u964d\u529f\u7387",
+        "\u523a\u75db",
+        "\u8fc7\u654f",
+        "\u95f7\u75d8",
+        "\u8f6f\u4fbf",
+        "\u62c9\u7a00",
+        "\u4e0d\u5403",
+        "\u592a\u91cd",
+        "\u6c89",
+        "overheat",
+        "flight banned",
+        "security rejected",
+        "heavy",
+    )
+    lowered = text.lower()
+    for term in canonical_terms:
+        if term in text or term.lower() in lowered:
+            return f"{term}\u98ce\u9669"
+    return text[:18]
+
+
+def adapt_scenario_locally(payload: ScenarioAdapterInput) -> ScenarioFit:
+    text = payload.user_raw_input
+    category_key = _category_for_cleaning(payload.slots.category)
+    if any(token in text for token in ("\u98de\u673a", "\u5b89\u68c0", "\u51fa\u5dee")) or category_key == "power_bank":
+        profile = (
+            "\u7528\u6237\u6838\u5fc3\u573a\u666f\u662f\u5750\u98de\u673a/\u51fa\u5dee\uff0c"
+            "\u5173\u6ce8\u5b89\u68c0\u3001Wh \u6807\u6ce8\u3001\u53d1\u70ed\u548c\u968f\u8eab\u643a\u5e26\u5b89\u5168\u3002"
+        )
+    elif any(token in text for token in ("\u654f\u611f", "\u6cb9\u76ae")) or category_key == "facial_mask":
+        profile = (
+            "\u7528\u6237\u6838\u5fc3\u573a\u666f\u662f\u654f\u611f\u808c/\u7279\u5b9a\u80a4\u8d28\uff0c"
+            "\u5173\u6ce8\u523a\u75db\u3001\u8fc7\u654f\u3001\u95f7\u75d8\u7b49\u4e00\u7968\u5426\u51b3\u98ce\u9669\u3002"
+        )
+    elif any(token in text for token in ("\u6cea\u75d5", "\u72d7")) or category_key == "dog_food":
+        profile = (
+            "\u7528\u6237\u6838\u5fc3\u573a\u666f\u662f\u5ba0\u7269\u6cea\u75d5\u7ba1\u7406\uff0c"
+            "\u5173\u6ce8\u8f6f\u4fbf\u3001\u62c9\u7a00\u3001\u4e0d\u5403\u548c\u957f\u671f\u9002\u5e94\u6027\u3002"
+        )
+    else:
+        profile = (
+            "\u7528\u6237\u672a\u63d0\u4f9b\u8db3\u591f\u7ec6\u7684\u573a\u666f\uff0c"
+            "\u9700\u8981\u4ee5\u8de8\u5e73\u53f0\u786c\u4f24\u4f5c\u4e3a\u4e3b\u5224\u65ad\u4f9d\u636e\u3002"
+        )
+
+    evidence_text = " ".join(item.text for item in payload.raw_data.ecommerce_evidence + payload.raw_data.xiaohongshu_evidence)
+    clash = None
+    if (
+        any(token in evidence_text for token in ("\u8f7b\u8584", "lightweight"))
+        and any(token in evidence_text for token in ("\u91cd", "\u6c89", "\u8d1f\u62c5", "heavy"))
+    ):
+        clash = "\u5b98\u65b9\u8f7b\u8584\u53d9\u4e8b\u4e0e\u771f\u5b9e\u7528\u6237\u91cd\u91cf\u8d1f\u62c5\u53cd\u9988\u51b2\u7a81\u3002"
+    elif (
+        any(token in evidence_text for token in ("\u63d0\u4eae", "brightening"))
+        and any(token in evidence_text for token in ("\u523a\u75db", "\u53d1\u7ea2", "\u7206\u75d8"))
+    ):
+        clash = "\u5b98\u65b9\u529f\u6548\u5356\u70b9\u4e0e\u771f\u5b9e\u523a\u6fc0\u53cd\u9988\u51b2\u7a81\u3002"
+    elif (
+        any(token in evidence_text for token in ("\u6cea\u75d5", "tear stain"))
+        and any(token in evidence_text for token in ("\u8f6f\u4fbf", "\u62c9\u7a00"))
+    ):
+        clash = "\u6cea\u75d5\u7ba1\u7406\u5356\u70b9\u4e0e\u80a0\u80c3\u9002\u5e94\u98ce\u9669\u51b2\u7a81\u3002"
+
+    veto_hits = collect_veto_hits(payload.ecommerce_data, payload.xiaohongshu_data)
+    hard_risks = "\u3001".join(finding.issue for finding in payload.cleaned_findings.core_scandals) or "\u6682\u672a\u53d1\u73b0\u6838\u5fc3\u786c\u4f24"
+    if veto_hits:
+        hard_risks = f"{hard_risks}\uff0c\u5df2\u547d\u4e2d\u4e00\u7968\u5426\u51b3\u89c4\u5219: {' / '.join(veto_hits)}"
+    return ScenarioFit(
+        user_profile_extracted=profile,
+        marketing_clash=clash,
+        suitability_analysis=(
+            f"\u8be5\u5546\u54c1\u5bf9\u8be5\u7528\u6237\u7684\u5173\u952e\u98ce\u9669\u662f\uff1a{hard_risks}\u3002"
+            "\u5982\u679c\u8fd9\u4e9b\u98ce\u9669\u547d\u4e2d\u6838\u5fc3\u573a\u666f\uff0c\u5e94\u4f18\u5148\u52a1\u9000\u3002"
+        ),
+    )
 
 
 def _messages_to_text(value: Any) -> str:
@@ -1284,3 +1723,14 @@ async def decision_endpoint(request: DecisionRequest) -> DecisionResponse:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "FITorNOT"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host=os.getenv("FITORNOT_HOST", "0.0.0.0"),
+        port=int(os.getenv("FITORNOT_PORT", "8000")),
+        reload=bool(os.getenv("FITORNOT_RELOAD")),
+    )
