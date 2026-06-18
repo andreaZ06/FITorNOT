@@ -5,6 +5,8 @@ import contextlib
 import json
 import os
 import re
+import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -17,6 +19,18 @@ DEFAULT_BROWSER_USER_AGENT = (
 )
 DEFAULT_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8"
 TAOBAO_RESPONSE_MARKER = "wirelessrecommend.recommend"
+BROWSER_PROFILE_SYNC_ARTIFACTS = (
+    "Local State",
+    "Default/Network/Cookies",
+    "Default/Network/Cookies-journal",
+    "Default/Preferences",
+    "Default/Secure Preferences",
+    "Default/Local Storage",
+    "Default/Session Storage",
+    "Default/IndexedDB",
+    "Default/WebStorage",
+    "Default/Storage",
+)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -26,17 +40,94 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _default_profile_source_root() -> Path | None:
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        return None
+
+    candidate = Path(local_app_data) / "Google" / "Chrome" / "User Data"
+    if (candidate / "Default").exists():
+        return candidate
+    return None
+
+
 def build_browser_session_config() -> dict[str, Any]:
     cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip()
     channel = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip() or DEFAULT_BROWSER_CHANNEL
     user_agent = os.getenv("FITORNOT_BROWSER_USER_AGENT", DEFAULT_BROWSER_USER_AGENT).strip() or DEFAULT_BROWSER_USER_AGENT
+    source_root = os.getenv("FITORNOT_BROWSER_PROFILE_SOURCE_DIR", "").strip()
+    if source_root:
+        profile_source_root = Path(source_root)
+    else:
+        profile_source_root = _default_profile_source_root()
     return {
         "mode": "cdp" if cdp_url else "persistent",
         "cdp_url": cdp_url or None,
         "channel": channel,
         "user_agent": user_agent,
         "extra_http_headers": {"Accept-Language": DEFAULT_ACCEPT_LANGUAGE},
+        "profile_source_root": str(profile_source_root) if profile_source_root else None,
+        "sync_system_profile": _env_flag(
+            "FITORNOT_BROWSER_SYNC_SYSTEM_PROFILE",
+            bool(profile_source_root),
+        ),
     }
+
+
+def sync_browser_profile(source_root: Path | str | None, target_root: Path | str) -> dict[str, Any]:
+    if not source_root:
+        return {"copied": False, "copied_entries": 0, "errors": []}
+
+    source_path = Path(source_root)
+    target_path = Path(target_root)
+    if not source_path.exists():
+        return {"copied": False, "copied_entries": 0, "errors": [f"missing source root: {source_path}"]}
+
+    if source_path.resolve() == target_path.resolve():
+        return {"copied": False, "copied_entries": 0, "errors": []}
+
+    copied_entries = 0
+    errors: list[str] = []
+    target_path.mkdir(parents=True, exist_ok=True)
+
+    for relative_path in BROWSER_PROFILE_SYNC_ARTIFACTS:
+        source_item = source_path / relative_path
+        if not source_item.exists():
+            continue
+
+        destination_item = target_path / relative_path
+        destination_item.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if source_item.is_dir():
+                shutil.copytree(source_item, destination_item, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source_item, destination_item)
+            copied_entries += 1
+        except OSError as exc:
+            if source_item.name == "Cookies" and _copy_sqlite_database(source_item, destination_item):
+                copied_entries += 1
+                continue
+            if source_item.name == "Cookies-journal":
+                continue
+            errors.append(f"{relative_path}: {exc}")
+
+    return {
+        "copied": copied_entries > 0,
+        "copied_entries": copied_entries,
+        "errors": errors,
+    }
+
+
+def _copy_sqlite_database(source_item: Path, destination_item: Path) -> bool:
+    destination_item.parent.mkdir(parents=True, exist_ok=True)
+    source_uri = f"file:{source_item.resolve().as_posix()}?mode=ro"
+    try:
+        with contextlib.closing(sqlite3.connect(source_uri, uri=True)) as source_connection:
+            with contextlib.closing(sqlite3.connect(destination_item)) as destination_connection:
+                source_connection.backup(destination_connection)
+        return True
+    except sqlite3.Error:
+        return False
 
 
 def _strip_jsonp_wrapper(text: str) -> str:
@@ -372,6 +463,8 @@ class PlaywrightDomesticBrowserAdapter:
                 return
 
             self.profile_dir.mkdir(parents=True, exist_ok=True)
+            if session_config.get("sync_system_profile") and session_config.get("profile_source_root"):
+                sync_browser_profile(session_config["profile_source_root"], self.profile_dir)
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self.profile_dir),
                 headless=self.headless,

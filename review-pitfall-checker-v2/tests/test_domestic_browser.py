@@ -1,10 +1,29 @@
 import importlib
 import os
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
 class DomesticBrowserHelpersTest(unittest.TestCase):
+    def test_build_browser_session_config_uses_explicit_profile_source_root(self):
+        module = importlib.import_module("domestic_browser")
+
+        with patch.dict(
+            os.environ,
+            {"FITORNOT_BROWSER_PROFILE_SOURCE_DIR": "C:/Users/test/AppData/Local/Google/Chrome/User Data"},
+            clear=False,
+        ):
+            config = module.build_browser_session_config()
+
+        self.assertEqual(
+            Path(config["profile_source_root"]),
+            Path("C:/Users/test/AppData/Local/Google/Chrome/User Data"),
+        )
+        self.assertTrue(config["sync_system_profile"])
+
     def test_build_browser_session_config_prefers_cdp_when_configured(self):
         module = importlib.import_module("domestic_browser")
 
@@ -120,6 +139,76 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
         self.assertEqual(sum(len(hit["comments"]) for hit in normalized), 20)
         self.assertEqual(normalized[0]["notes"][0]["text"], "第一篇")
         self.assertTrue(normalized[1]["comments"])
+
+    def test_sync_browser_profile_copies_supported_auth_artifacts(self):
+        module = importlib.import_module("domestic_browser")
+
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as target_dir:
+            source_root = Path(source_dir)
+            target_root = Path(target_dir)
+            (source_root / "Local State").write_text("{}", encoding="utf-8")
+            (source_root / "lockfile").write_text("locked", encoding="utf-8")
+            (source_root / "Default" / "Network").mkdir(parents=True)
+            (source_root / "Default" / "Network" / "Cookies").write_text("cookie-db", encoding="utf-8")
+            (source_root / "Default" / "Local Storage" / "leveldb").mkdir(parents=True)
+            (source_root / "Default" / "Local Storage" / "leveldb" / "000001.ldb").write_text(
+                "session",
+                encoding="utf-8",
+            )
+            (source_root / "Default" / "Cache").mkdir(parents=True)
+            (source_root / "Default" / "Cache" / "cache.bin").write_text("cache", encoding="utf-8")
+
+            summary = module.sync_browser_profile(source_root, target_root)
+            self.assertTrue(summary["copied"])
+            self.assertTrue((target_root / "Local State").exists())
+            self.assertTrue((target_root / "Default" / "Network" / "Cookies").exists())
+            self.assertTrue((target_root / "Default" / "Local Storage" / "leveldb" / "000001.ldb").exists())
+            self.assertFalse((target_root / "lockfile").exists())
+            self.assertFalse((target_root / "Default" / "Cache").exists())
+
+    def test_sync_browser_profile_returns_empty_summary_when_source_is_missing(self):
+        module = importlib.import_module("domestic_browser")
+
+        with tempfile.TemporaryDirectory() as target_dir:
+            summary = module.sync_browser_profile(
+                Path("C:/definitely-missing-fitornot-profile"),
+                Path(target_dir),
+            )
+
+        self.assertFalse(summary["copied"])
+        self.assertEqual(summary["copied_entries"], 0)
+
+    def test_sync_browser_profile_falls_back_to_sqlite_backup_for_locked_cookie_db(self):
+        module = importlib.import_module("domestic_browser")
+
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as target_dir:
+            source_root = Path(source_dir)
+            target_root = Path(target_dir)
+            cookie_db = source_root / "Default" / "Network" / "Cookies"
+            cookie_db.parent.mkdir(parents=True)
+            connection = sqlite3.connect(cookie_db)
+            connection.execute("CREATE TABLE sample (value TEXT)")
+            connection.execute("INSERT INTO sample(value) VALUES ('trusted-session')")
+            connection.commit()
+            connection.close()
+
+            real_copy2 = module.shutil.copy2
+
+            def flaky_copy2(source, destination, *args, **kwargs):
+                if Path(source) == cookie_db:
+                    raise PermissionError("file is locked")
+                return real_copy2(source, destination, *args, **kwargs)
+
+            with patch.object(module.shutil, "copy2", side_effect=flaky_copy2):
+                summary = module.sync_browser_profile(source_root, target_root)
+
+            self.assertTrue(summary["copied"])
+            self.assertTrue((target_root / "Default" / "Network" / "Cookies").exists())
+            copied_connection = sqlite3.connect(target_root / "Default" / "Network" / "Cookies")
+            row = copied_connection.execute("SELECT value FROM sample").fetchone()
+            copied_connection.close()
+            self.assertEqual(row[0], "trusted-session")
+            self.assertFalse(summary["errors"])
 
 
 if __name__ == "__main__":

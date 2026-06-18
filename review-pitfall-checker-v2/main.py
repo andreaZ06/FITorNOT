@@ -910,6 +910,25 @@ def _browser_adapter_unavailable_error() -> RuntimeError:
     )
 
 
+def _trusted_session_bootstrap_hint() -> str:
+    adapter = get_domestic_browser_adapter()
+    default_profile_dir = Path(__file__).resolve().parent / ".browser-profile"
+    profile_dir = Path(getattr(adapter, "profile_dir", default_profile_dir))
+    return (
+        f"Open the FITorNOT browser profile at {profile_dir} and log in once, or connect a trusted Chrome "
+        "session via FITORNOT_BROWSER_CDP_URL."
+    )
+
+
+def _augment_browser_block_reason(reason: str) -> str:
+    lowered = reason.lower()
+    if "fitornot_browser_cdp_url" in lowered:
+        return reason
+    if "trusted browser session" in lowered or "captcha verification triggered" in lowered:
+        return f"{reason} {_trusted_session_bootstrap_hint()}"
+    return reason
+
+
 async def fetch_ecommerce_candidates(query: str, category: str, limit: int = 20) -> list[dict[str, Any]]:
     adapter = get_domestic_browser_adapter()
     if adapter is None:
@@ -1079,7 +1098,7 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
             blocked_sources.append({"source": "domestic_ecommerce", "reason": "no browser results returned"})
     except Exception as exc:  # noqa: BLE001
         ecommerce_candidates = []
-        blocked_sources.append({"source": "domestic_ecommerce", "reason": str(exc)})
+        blocked_sources.append({"source": "domestic_ecommerce", "reason": _augment_browser_block_reason(str(exc))})
 
     generated_xhs_queries = build_candidate_xhs_queries(ecommerce_candidates, payload.slots.category)
     if not generated_xhs_queries:
@@ -1091,7 +1110,7 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
             blocked_sources.append({"source": "xiaohongshu", "reason": "no browser results returned"})
     except Exception as exc:  # noqa: BLE001
         xiaohongshu_hits = []
-        blocked_sources.append({"source": "xiaohongshu", "reason": str(exc)})
+        blocked_sources.append({"source": "xiaohongshu", "reason": _augment_browser_block_reason(str(exc))})
 
     return _build_domestic_fetch_output(
         payload,

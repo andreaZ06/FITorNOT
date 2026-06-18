@@ -1228,6 +1228,42 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn("no browser results", result.blocked_sources[0]["reason"])
         self.assertIn("no browser results", result.blocked_sources[1]["reason"])
 
+    def test_domestic_recall_fetch_adds_bootstrap_hint_when_trusted_session_is_required(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category="充电宝", brand="Anker", model="10000", urls=[])
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        class FakeAdapter:
+            profile_dir = Path("C:/tmp/fitornot/.browser-profile")
+
+        async def blocked_ecommerce(_query, _category, limit):
+            self.assertEqual(limit, 20)
+            raise RuntimeError("JD search login required: use a trusted browser session.")
+
+        async def blocked_xhs(_queries, limit):
+            self.assertEqual(limit, 10)
+            raise RuntimeError("Xiaohongshu search login required: use a trusted browser session.")
+
+        module.fetch_ecommerce_candidates = blocked_ecommerce
+        module.fetch_xiaohongshu_feedback = blocked_xhs
+        module.set_domestic_browser_adapter(FakeAdapter())
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.fetch_status, "partial_failed")
+        self.assertIn("FITORNOT_BROWSER_CDP_URL", result.blocked_sources[0]["reason"])
+        self.assertIn(".browser-profile", result.blocked_sources[0]["reason"])
+        self.assertIn("log in once", result.blocked_sources[1]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
