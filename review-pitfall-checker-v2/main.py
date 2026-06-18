@@ -226,6 +226,7 @@ class BrightDataFetchOutput(BaseModel):
     ecommerce_data: list[dict[str, Any]] = Field(default_factory=list)
     xiaohongshu_data: list[dict[str, Any]] = Field(default_factory=list)
     blocked_sources: list[dict[str, str]] = Field(default_factory=list)
+    fetch_status: str = "success"
 
 
 class AnalyzerInput(BaseModel):
@@ -278,6 +279,7 @@ class DecisionState(TypedDict):
     ecommerce_data: NotRequired[list[dict[str, Any]]]
     xiaohongshu_data: NotRequired[list[dict[str, Any]]]
     blocked_sources: NotRequired[list[dict[str, str]]]
+    fetch_status: NotRequired[str]
     cleaned_findings: NotRequired[CleanedFindings]
     scenario_fit: NotRequired[ScenarioFit]
     final_report: NotRequired[FinalReport]
@@ -642,12 +644,13 @@ async def brightdata_mcp_fetch_node(state: DecisionState) -> DecisionState:
                     output = await _execute_brightdata_tool_calls(session, payload, tasks, tool_calls)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Bright Data MCP fetch failed: %s", exc)
-            output = _build_mock_fetch_output(payload, reason=str(exc))
+            output = _build_mock_fetch_output(payload, reason=str(exc), allow_synthetic_payload=False)
 
     state["raw_data"] = output.raw_data
     state["ecommerce_data"] = output.ecommerce_data
     state["xiaohongshu_data"] = output.xiaohongshu_data
     state["blocked_sources"] = output.blocked_sources
+    state["fetch_status"] = output.fetch_status
     return state
 
 
@@ -680,11 +683,22 @@ async def _run_brightdata_fetch(payload: BrightDataFetchInput) -> BrightDataFetc
         ecommerce_data=state.get("ecommerce_data", []),
         xiaohongshu_data=state.get("xiaohongshu_data", []),
         blocked_sources=state.get("blocked_sources", []),
+        fetch_status=state.get("fetch_status", "success"),
     )
 
 
-def _build_mock_fetch_output(payload: BrightDataFetchInput, reason: str | None = None) -> BrightDataFetchOutput:
-    raw_data = mock_raw_platform_data(payload.slots, payload.retrieval_plan)
+def _build_mock_fetch_output(
+    payload: BrightDataFetchInput,
+    reason: str | None = None,
+    allow_synthetic_payload: bool = True,
+    blocked_sources: list[dict[str, str]] | None = None,
+) -> BrightDataFetchOutput:
+    if allow_synthetic_payload:
+        raw_data = mock_raw_platform_data(payload.slots, payload.retrieval_plan)
+    else:
+        raw_data = RawPlatformData(retrieval_plan=payload.retrieval_plan)
+    for blocked_source in blocked_sources or []:
+        raw_data.blocked_sources.append(dict(blocked_source))
     if reason:
         raw_data.blocked_sources.append({"source": "brightdata", "reason": reason})
     ecommerce_data = [item.model_dump() for item in raw_data.ecommerce_evidence]
@@ -694,6 +708,7 @@ def _build_mock_fetch_output(payload: BrightDataFetchInput, reason: str | None =
         ecommerce_data=ecommerce_data,
         xiaohongshu_data=xiaohongshu_data,
         blocked_sources=raw_data.blocked_sources,
+        fetch_status="success" if allow_synthetic_payload and not reason else "partial_failed",
     )
 
 
@@ -768,14 +783,18 @@ def _build_brightdata_tasks(payload: BrightDataFetchInput) -> list[dict[str, str
 def _build_brightdata_fetch_messages(
     payload: BrightDataFetchInput, tasks: list[dict[str, str]]
 ) -> list[tuple[str, str]]:
-    system_prompt = (
-        "You are FITorNOT's Bright Data MCP fetch operator. "
-        "You have live Bright Data MCP tools available right now. "
-        "Prioritize direct scraping for every URL in state.user_bound_urls. "
-        "Then cover the ecommerce search query and the generated_xhs_queries for Xiaohongshu. "
-        "Call the MCP tools only with the exact url or query values provided in the task list. "
-        "Do not summarize; just decide which tools to call so the workflow can collect raw evidence."
-    )
+    system_prompt = """# Role: Bright Data MCP 自动化数据调度员
+
+# Context
+你当前处于一个可以实时连接互联网的 Agent 节点中。你拥有 `brightdata__scrape_url` 和 `brightdata__search_keyword` 两个核心底层武器。
+
+# Instruction Rules
+1. **优先提取 URL**：如果全局状态中 `user_bound_urls` 不为空，必须依次且并行发起 `brightdata__scrape_url` 工具调用。
+2. **动态构造负面探针**：若用户未提供链接，你必须根据规划器解析出的商品信息，联动行业常见通病，发起 `brightdata__search_keyword` 工具：
+   - 平台：`jd` 或 `taobao` ── 关键词："[品牌] [型号]" (抓取商品页以提取官参和基本差评)。
+   - 平台：`xhs` ── 关键词："[品牌] [型号] 翻车" 或 "[品牌] [型号] 真实体验"。
+3. **拒绝凭空想象**：一旦工具返回 403、429（被防风控拦截），必须如实记录并在上下文中置入 `fetch_status: partial_failed`，严禁编造任何虚假的评论字句。
+"""
     user_payload = {
         "user_raw_input": payload.user_raw_input,
         "slots": payload.slots.model_dump(),
@@ -862,7 +881,13 @@ async def _execute_brightdata_tool_calls(
             )
 
     if not ecommerce_evidence and not xiaohongshu_evidence:
-        return _build_mock_fetch_output(payload, reason="All MCP tool calls failed; mock schema payload used.")
+        reason = blocked_sources[0]["reason"] if blocked_sources else "All MCP tool calls failed."
+        return _build_mock_fetch_output(
+            payload,
+            reason=reason if not blocked_sources else None,
+            allow_synthetic_payload=False,
+            blocked_sources=blocked_sources,
+        )
 
     raw_data = RawPlatformData(
         retrieval_plan=payload.retrieval_plan,
@@ -876,6 +901,7 @@ async def _execute_brightdata_tool_calls(
         ecommerce_data=ecommerce_data,
         xiaohongshu_data=xiaohongshu_data,
         blocked_sources=blocked_sources,
+        fetch_status="partial_failed" if blocked_sources else "success",
     )
 
 

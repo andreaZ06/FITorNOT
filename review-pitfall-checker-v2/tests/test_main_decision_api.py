@@ -241,6 +241,10 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(captures["server_command"], "npx")
         self.assertEqual(captures["server_args"], ["-y", "@brightdata/mcp-server-scraper"])
         self.assertEqual(captures["server_env"]["BRIGHTDATA_API_KEY"], "brightdata-test-key")
+        self.assertIn("Bright Data MCP 自动化数据调度员", captures["messages"][0][1])
+        self.assertIn("brightdata__scrape_url", captures["messages"][0][1])
+        self.assertIn("brightdata__search_keyword", captures["messages"][0][1])
+        self.assertIn("user_bound_urls", captures["messages"][0][1])
         self.assertTrue(captures["initialized"])
         self.assertTrue(captures["listed_tools"])
         self.assertEqual(captures["bound_tools"][0]["function"]["name"], "brightdata__scrape")
@@ -294,8 +298,11 @@ class MainDecisionApiTest(unittest.TestCase):
 
         self.assertTrue(result["raw_data"].blocked_sources)
         self.assertIn("429 rate limited", result["raw_data"].blocked_sources[0]["reason"])
-        self.assertTrue(result["ecommerce_data"])
-        self.assertTrue(result["xiaohongshu_data"])
+        self.assertEqual(result["fetch_status"], "partial_failed")
+        self.assertFalse(result["ecommerce_data"])
+        self.assertFalse(result["xiaohongshu_data"])
+        self.assertFalse(result["raw_data"].ecommerce_evidence)
+        self.assertFalse(result["raw_data"].xiaohongshu_evidence)
 
 
 if __name__ == "__main__":
