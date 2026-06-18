@@ -744,6 +744,78 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertTrue(result.blocked_sources)
         self.assertEqual(result.blocked_sources[0]["source"], "domestic_ecommerce")
 
+    def test_fetch_ecommerce_candidates_uses_registered_browser_adapter(self):
+        module = importlib.import_module("main")
+
+        class FakeAdapter:
+            async def fetch_ecommerce_candidates(self, query, category, limit=20):
+                self.query = query
+                self.category = category
+                self.limit = limit
+                return [
+                    {
+                        "title": "Anker 10000mAh Nano",
+                        "price": "149",
+                        "shop_name": "Anker旗舰店",
+                        "url": "https://item.jd.com/1.html",
+                        "platform": "jd",
+                    }
+                ]
+
+        adapter = FakeAdapter()
+        module.set_domestic_browser_adapter(adapter)
+
+        result = asyncio.run(module.fetch_ecommerce_candidates("Anker 10000", module.SUPPORTED_CATEGORIES[0], limit=20))
+
+        self.assertEqual(result[0]["title"], "Anker 10000mAh Nano")
+        self.assertEqual(adapter.query, "Anker 10000")
+        self.assertEqual(adapter.category, module.SUPPORTED_CATEGORIES[0])
+        self.assertEqual(adapter.limit, 20)
+
+    def test_fetch_xiaohongshu_feedback_uses_registered_browser_adapter(self):
+        module = importlib.import_module("main")
+
+        class FakeAdapter:
+            async def fetch_xiaohongshu_feedback(self, queries, limit=10):
+                self.queries = list(queries)
+                self.limit = limit
+                return [
+                    {
+                        "query": queries[0],
+                        "notes": [{"text": "说能上飞机，但有点热"}],
+                        "comments": [{"text": "我带过，安检能过"}],
+                    }
+                ]
+
+        adapter = FakeAdapter()
+        module.set_domestic_browser_adapter(adapter)
+
+        result = asyncio.run(module.fetch_xiaohongshu_feedback(["Anker 10000mAh Nano 避雷"], limit=10))
+
+        self.assertEqual(result[0]["query"], "Anker 10000mAh Nano 避雷")
+        self.assertEqual(adapter.queries, ["Anker 10000mAh Nano 避雷"])
+        self.assertEqual(adapter.limit, 10)
+
+    def test_default_domestic_browser_adapter_uses_factory_when_playwright_is_available(self):
+        module = importlib.import_module("main")
+        fake_adapter = object()
+        module.build_default_domestic_browser_adapter = lambda: fake_adapter
+        module.set_domestic_browser_adapter(None)
+
+        adapter = module.get_domestic_browser_adapter()
+
+        self.assertIs(adapter, fake_adapter)
+
+    def test_browser_unavailable_error_mentions_playwright_installation(self):
+        module = importlib.import_module("main")
+        module.set_domestic_browser_adapter(None)
+        module.build_default_domestic_browser_adapter = lambda: None
+
+        with self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(module.fetch_ecommerce_candidates("Anker 10000", module.SUPPORTED_CATEGORIES[0], limit=20))
+
+        self.assertIn("pip install playwright", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

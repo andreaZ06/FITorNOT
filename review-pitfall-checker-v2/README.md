@@ -31,6 +31,38 @@ That adapter is the only place that should call Bright Data MCP tools, such as
 itself does not scrape pages directly and does not invent data when a scrape
 fails.
 
+## Domestic Browser Recall
+
+For JD, Taobao, and Xiaohongshu, the current runtime now supports a Playwright
+browser adapter as the primary domestic recall path. It is designed for
+lightweight list-page recall on e-commerce sites and reverse-search note/comment
+recall on Xiaohongshu.
+
+First-time setup:
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
+```
+
+Optional environment variables:
+
+```bash
+FITORNOT_BROWSER_PROFILE_DIR=./.browser-profile
+FITORNOT_BROWSER_HEADLESS=false
+FITORNOT_BROWSER_TIMEOUT_MS=45000
+FITORNOT_BROWSER_SCROLL_ROUNDS=2
+```
+
+Notes:
+
+- Use `FITORNOT_BROWSER_HEADLESS=false` on the first run so you can complete
+  manual login for Taobao or Xiaohongshu if needed.
+- Login state is stored in the persistent profile directory and will be reused
+  across runs.
+- If browser automation is unavailable or blocked, the workflow degrades to the
+  existing Bright Data fallback without inventing comments.
+
 ## Python Usage
 
 ```python

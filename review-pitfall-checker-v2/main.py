@@ -48,6 +48,11 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency
     asyncpg = None
 
+try:
+    from domestic_browser import PlaywrightDomesticBrowserAdapter
+except Exception:  # pragma: no cover - optional runtime dependency
+    PlaywrightDomesticBrowserAdapter = None
+
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 SUPPORTED_CATEGORIES = ("充电宝", "面膜", "狗粮", "其他")
@@ -822,8 +827,39 @@ async def create_decision(request: DecisionRequest, use_mock: bool | None = None
     )
 
 
+_DOMESTIC_BROWSER_ADAPTER: Any = None
+
+
+def build_default_domestic_browser_adapter() -> Any:
+    if PlaywrightDomesticBrowserAdapter is None:
+        return None
+    return PlaywrightDomesticBrowserAdapter()
+
+
+def set_domestic_browser_adapter(adapter: Any) -> None:
+    global _DOMESTIC_BROWSER_ADAPTER
+    _DOMESTIC_BROWSER_ADAPTER = adapter
+
+
+def get_domestic_browser_adapter() -> Any:
+    global _DOMESTIC_BROWSER_ADAPTER
+    if _DOMESTIC_BROWSER_ADAPTER is None:
+        _DOMESTIC_BROWSER_ADAPTER = build_default_domestic_browser_adapter()
+    return _DOMESTIC_BROWSER_ADAPTER
+
+
+def _browser_adapter_unavailable_error() -> RuntimeError:
+    return RuntimeError(
+        "Playwright browser adapter is unavailable. Install it with `pip install playwright` and run "
+        "`playwright install chromium`."
+    )
+
+
 async def fetch_ecommerce_candidates(query: str, category: str, limit: int = 20) -> list[dict[str, Any]]:
-    raise RuntimeError("Playwright and DrissionPage are unavailable")
+    adapter = get_domestic_browser_adapter()
+    if adapter is None:
+        raise _browser_adapter_unavailable_error()
+    return await adapter.fetch_ecommerce_candidates(query, category, limit=limit)
 
 
 def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
@@ -875,7 +911,10 @@ def build_candidate_xhs_queries(candidates: list[dict[str, Any]], category: str)
 
 
 async def fetch_xiaohongshu_feedback(queries: list[str], limit: int = 10) -> list[dict[str, Any]]:
-    raise RuntimeError("Playwright and DrissionPage are unavailable")
+    adapter = get_domestic_browser_adapter()
+    if adapter is None:
+        raise _browser_adapter_unavailable_error()
+    return await adapter.fetch_xiaohongshu_feedback(queries, limit=limit)
 
 
 def _candidate_to_evidence(candidate: dict[str, Any]) -> EvidenceItem:
