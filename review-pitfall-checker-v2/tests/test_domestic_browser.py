@@ -82,6 +82,30 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
         self.assertIn("login", reason.lower())
         self.assertIn("jd", reason.lower())
 
+    def test_detect_platform_block_reason_identifies_jd_frequency_limit(self):
+        module = importlib.import_module("domestic_browser")
+
+        reason = module.detect_platform_block_reason(
+            "jd",
+            "Anker 1000 - 商品搜索 - 京东",
+            "抱歉由于访问频繁导致无法搜索，请稍后再试！ 若长时间无法搜索可点此反馈",
+        )
+
+        self.assertIn("jd", reason.lower())
+        self.assertTrue("frequent" in reason.lower() or "search" in reason.lower())
+
+    def test_detect_platform_block_reason_identifies_jd_verification_wall(self):
+        module = importlib.import_module("domestic_browser")
+
+        reason = module.detect_platform_block_reason(
+            "jd",
+            "京东验证",
+            "验证一下，购物无忧 快速验证 遇到问题点我反馈",
+        )
+
+        self.assertIn("jd", reason.lower())
+        self.assertTrue("verification" in reason.lower() or "trusted browser session" in reason.lower())
+
     def test_detect_platform_block_reason_identifies_xhs_login_prompt(self):
         module = importlib.import_module("domestic_browser")
 
@@ -139,6 +163,35 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
         self.assertEqual(candidates[0]["title"], "Anker Nano 10000mAh 充电宝")
         self.assertEqual(candidates[0]["url"], "https://item.taobao.com/item.htm?id=1234567890")
         self.assertEqual(candidates[1]["platform"], "taobao")
+
+    def test_parse_jd_search_cards_extracts_candidates_from_current_card_shape(self):
+        module = importlib.import_module("domestic_browser")
+
+        candidates = module.parse_jd_search_cards(
+            [
+                {
+                    "sku": "100241293249",
+                    "title": "ANKER zolo安克【新3C认证上飞机】充电宝自带双c线10000毫安mAh大容量35W快充移动电源安卓苹果手机白",
+                    "price": "¥ 116 . 2",
+                    "shop_name": "Anker京东自营旗舰店",
+                    "text": "ANKER zolo安克【新3C认证上飞机】充电宝自带双c线10000毫安mAh大容量35W快充移动电源安卓苹果手机白 3C认证手机移动电源折扣榜第3名 轻薄便携 |双C线设计 |35W快充 |大容量续航 ¥ 116 . 2 已售5万+ Anker京东自营旗舰店",
+                },
+                {
+                    "sku": "10222945730904",
+                    "title": "ANKER安克Air磁吸无线快充移动电源2026新国标3C认证可上飞机小巧便携苹果适用 10000mAh",
+                    "price": "¥ 1275",
+                    "shop_name": "防晒运动好物优选店",
+                    "text": "ANKER安克Air磁吸无线快充移动电源2026新国标3C认证可上飞机小巧便携苹果适用 10000mAh ¥ 1275 100%好评 防晒运动好物优选店",
+                },
+            ],
+            limit=5,
+        )
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0]["platform"], "jd")
+        self.assertEqual(candidates[0]["url"], "https://item.jd.com/100241293249.html")
+        self.assertEqual(candidates[0]["price"], "116.2")
+        self.assertIn("Anker京东自营旗舰店", candidates[0]["shop_name"])
 
     def test_normalize_xhs_search_candidates_prefers_search_result_title_over_blank_explore_link(self):
         module = importlib.import_module("domestic_browser")

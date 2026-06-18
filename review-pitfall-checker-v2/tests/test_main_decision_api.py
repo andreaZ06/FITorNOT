@@ -1300,6 +1300,26 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(queries[0], "Anker 候选1 避雷")
         self.assertEqual(queries[-1], "Anker 候选5 避雷")
 
+    def test_normalize_ecommerce_candidates_round_robins_across_platforms(self):
+        module = importlib.import_module("main")
+
+        normalized = module.normalize_ecommerce_candidates(
+            [
+                {"title": "JD 1", "price": "101", "shop_name": "JD Shop 1", "url": "https://item.jd.com/1.html", "platform": "jd"},
+                {"title": "JD 2", "price": "102", "shop_name": "JD Shop 2", "url": "https://item.jd.com/2.html", "platform": "jd"},
+                {"title": "JD 3", "price": "103", "shop_name": "JD Shop 3", "url": "https://item.jd.com/3.html", "platform": "jd"},
+                {"title": "TB 1", "price": "201", "shop_name": "TB Shop 1", "url": "https://item.taobao.com/item.htm?id=1", "platform": "taobao"},
+                {"title": "TB 2", "price": "202", "shop_name": "TB Shop 2", "url": "https://item.taobao.com/item.htm?id=2", "platform": "taobao"},
+                {"title": "TB 3", "price": "203", "shop_name": "TB Shop 3", "url": "https://item.taobao.com/item.htm?id=3", "platform": "taobao"},
+            ],
+            limit=5,
+        )
+
+        self.assertEqual(len(normalized), 5)
+        self.assertEqual([item["platform"] for item in normalized[:4]], ["jd", "taobao", "jd", "taobao"])
+        self.assertEqual(sum(1 for item in normalized if item["platform"] == "jd"), 3)
+        self.assertEqual(sum(1 for item in normalized if item["platform"] == "taobao"), 2)
+
     def test_domestic_recall_fetch_marks_empty_browser_results_as_partial_failure(self):
         module = importlib.import_module("main")
         slots = module.IntentSlots(category="充电宝", brand="Anker", model="10000", urls=[])
@@ -1374,6 +1394,52 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn(".browser-profile", result.blocked_sources[0]["reason"])
         self.assertIn("start_fitornot_browser.ps1", result.blocked_sources[0]["reason"])
         self.assertIn("log in once", result.blocked_sources[1]["reason"])
+
+    def test_domestic_recall_fetch_records_platform_level_block_when_other_source_succeeds(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category=module.SUPPORTED_CATEGORIES[0], brand="Anker", model="10000", urls=[])
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_fetch_for_platform(_query, _category, platform, limit):
+            self.assertEqual(limit, 20)
+            if platform == "jd":
+                raise RuntimeError("JD search is rate-limited because access is too frequent.")
+            return [
+                {
+                    "title": f"TB {i}",
+                    "price": f"{100 + i}",
+                    "shop_name": f"TB Shop {i}",
+                    "url": f"https://item.taobao.com/item.htm?id={i}",
+                    "platform": "taobao",
+                }
+                for i in range(1, 7)
+            ]
+
+        async def fake_xhs(queries, limit):
+            self.assertEqual(limit, 10)
+            self.assertTrue(queries)
+            return [{"query": queries[0], "notes": [], "comments": [{"text": "可以上飞机，但会看Wh"}]}]
+
+        module.fetch_ecommerce_candidates_for_platform = fake_fetch_for_platform
+        module.fetch_xiaohongshu_feedback = fake_xhs
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="鎴戞兂涔癆nker 10000姣畨鐨勫厖鐢靛疂浣嗘槸鎴戜笉鐭ラ亾瀹冭兘涓嶈兘涓婇鏈哄憖",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.fetch_status, "partial_failed")
+        self.assertEqual(len(result.ecommerce_candidates), 5)
+        self.assertTrue(result.xiaohongshu_hits)
+        self.assertEqual(result.blocked_sources[0]["source"], "domestic_ecommerce")
+        self.assertIn("jd", result.blocked_sources[0]["reason"].lower())
+        self.assertTrue(all(item["platform"] == "taobao" for item in result.ecommerce_candidates))
 
 
 if __name__ == "__main__":

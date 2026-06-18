@@ -260,6 +260,61 @@ def parse_taobao_search_response(response_text: str, limit: int = 20) -> list[di
     return candidates
 
 
+def _normalize_price_text(text: str) -> str:
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    normalized = normalized.replace("¥", "").replace("￥", "")
+    match = re.search(r"\d+(?:\.\d+)?", normalized)
+    return match.group(0) if match else normalized
+
+
+def _extract_jd_shop_name(record: dict[str, Any]) -> str:
+    direct = _extract_scalar(record, "shop_name", "shopName", "shop", "seller")
+    if direct:
+        return re.sub(r"\s+", " ", direct).strip()
+
+    text = re.sub(r"\s+", " ", str(record.get("text", "")).strip())
+    matches = re.findall(
+        r"([A-Za-z0-9\u4e00-\u9fff【】（）()\-·\s]+(?:京东自营旗舰店|京东自营|旗舰店|专卖店|专营店|优选店|工作室|小铺|店))",
+        text,
+    )
+    return matches[-1].strip() if matches else ""
+
+
+def parse_jd_search_cards(raw_cards: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in raw_cards:
+        title = re.sub(r"\s+", " ", _extract_scalar(record, "title", "name", "text")).strip()
+        price = _normalize_price_text(_extract_scalar(record, "price", "priceText"))
+        shop_name = _extract_jd_shop_name(record)
+        sku = re.sub(r"\D+", "", _extract_scalar(record, "sku", "itemId", "id"))
+        url = _extract_scalar(record, "url", "itemUrl", "detailUrl")
+        if not url and sku:
+            url = f"https://item.jd.com/{sku}.html"
+
+        if len(title) < 4:
+            continue
+        if not any([price, shop_name, url]):
+            continue
+
+        dedupe_key = f"{title.lower()}|{url}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        candidates.append(
+            {
+                "title": title,
+                "price": price,
+                "shop_name": shop_name,
+                "url": url,
+                "platform": "jd",
+            }
+        )
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def cap_xhs_hits(hits: list[dict[str, Any]], total_comment_limit: int = 20) -> list[dict[str, Any]]:
     remaining = max(total_comment_limit, 0)
     normalized: list[dict[str, Any]] = []
@@ -375,6 +430,10 @@ def detect_platform_block_reason(
             or ("获取验证码" in combined and "账号密码登录" in combined)
         ):
             return "JD search login required: use a trusted browser session."
+        if "京东验证" in combined or ("验证一下" in combined and "快速验证" in combined):
+            return "JD search verification required: use a trusted browser session."
+        if "访问频繁" in combined or "无法搜索" in combined:
+            return "JD search is rate-limited because access is too frequent."
         return None
 
     if platform in {"xiaohongshu", "xhs"}:
@@ -621,20 +680,34 @@ class PlaywrightDomesticBrowserAdapter:
 
     async def _extract_ecommerce_candidates(self, page: Any, platform: str, limit: int) -> list[dict[str, Any]]:
         if platform == "jd":
-            return await page.evaluate(
-                """(limit) => {
-                    const nodes = Array.from(document.querySelectorAll('li.gl-item'));
+            raw_cards = await page.evaluate(
+                r"""(limit) => {
+                    const nodes = Array.from(document.querySelectorAll('[data-sku]'));
                     return nodes.slice(0, limit).map((node) => {
-                        const anchor = node.querySelector('.p-name a');
-                        const title = (node.querySelector('.p-name em')?.innerText || anchor?.innerText || '').trim();
-                        const price = (node.querySelector('.p-price strong i')?.innerText || node.querySelector('.p-price')?.innerText || '').trim();
-                        const shop = (node.querySelector('.p-shop a')?.innerText || '').trim();
-                        const href = anchor?.href || '';
-                        return { title, price, shop_name: shop, url: href, platform: 'jd' };
-                    }).filter((item) => item.title);
+                        const title = (
+                            node.querySelector('[class*="goods_title_container"]')?.innerText
+                            || node.querySelector('[class*="goods-title"]')?.innerText
+                            || ''
+                        ).replace(/\s+/g, ' ').trim();
+                        const price = (
+                            node.querySelector('[class*="_price_"]')?.innerText
+                            || node.querySelector('[class*="price"]')?.innerText
+                            || ''
+                        ).replace(/\s+/g, ' ').trim();
+                        const texts = Array.from(node.querySelectorAll('div, span, a'))
+                            .map((el) => (el.innerText || '').replace(/\s+/g, ' ').trim())
+                            .filter(Boolean);
+                        const shopName = [...texts].reverse().find((text) =>
+                            /(京东自营旗舰店|京东自营|旗舰店|专卖店|专营店|优选店|工作室|小铺|店)/.test(text)
+                        ) || '';
+                        const sku = node.getAttribute('data-sku') || '';
+                        const text = (node.innerText || '').replace(/\s+/g, ' ').trim();
+                        return { sku, title, price, shop_name: shopName, text };
+                    });
                 }""",
                 limit,
             )
+            return parse_jd_search_cards(raw_cards, limit=limit)
 
         return await page.evaluate(
             """(limit) => {

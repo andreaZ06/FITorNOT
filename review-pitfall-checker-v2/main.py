@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, NotRequired, Optional, TypedDict
@@ -957,8 +958,25 @@ async def fetch_ecommerce_candidates(query: str, category: str, limit: int = 20)
     return await adapter.fetch_ecommerce_candidates(query, category, limit=limit)
 
 
+async def fetch_ecommerce_candidates_for_platform(
+    query: str,
+    category: str,
+    platform: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    adapter = get_domestic_browser_adapter()
+    if PlaywrightDomesticBrowserAdapter is not None and isinstance(adapter, PlaywrightDomesticBrowserAdapter):
+        scoped_adapter = PlaywrightDomesticBrowserAdapter(
+            profile_dir=str(getattr(adapter, "profile_dir", _browser_profile_dir())),
+            headless=getattr(adapter, "headless", None),
+            ecommerce_platforms=(platform,),
+        )
+        return await scoped_adapter.fetch_ecommerce_candidates(query, category, limit=limit)
+    return await fetch_ecommerce_candidates(query, category, limit=limit)
+
+
 def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
+    ordered_candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in items:
         title = str(item.get("title", "")).strip()
@@ -968,7 +986,7 @@ def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) 
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
-        normalized.append(
+        ordered_candidates.append(
             {
                 "title": title,
                 "price": str(item.get("price", "")).strip(),
@@ -977,7 +995,35 @@ def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) 
                 "platform": str(item.get("platform", "search")).strip(),
             }
         )
-        if len(normalized) >= limit:
+        if len(ordered_candidates) >= limit * 4:
+            break
+    if len(ordered_candidates) <= 1:
+        return ordered_candidates[:limit]
+
+    grouped: dict[str, deque[dict[str, Any]]] = {}
+    platform_order: list[str] = []
+    for candidate in ordered_candidates:
+        platform = candidate["platform"] or "search"
+        if platform not in grouped:
+            grouped[platform] = deque()
+            platform_order.append(platform)
+        grouped[platform].append(candidate)
+
+    if len(platform_order) <= 1:
+        return ordered_candidates[:limit]
+
+    normalized: list[dict[str, Any]] = []
+    while len(normalized) < limit:
+        progressed = False
+        for platform in platform_order:
+            queue = grouped[platform]
+            if not queue:
+                continue
+            normalized.append(queue.popleft())
+            progressed = True
+            if len(normalized) >= limit:
+                break
+        if not progressed:
             break
     return normalized
 
@@ -1108,18 +1154,34 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
         )
 
     blocked_sources: list[dict[str, str]] = []
-    try:
-        raw_candidates = await fetch_ecommerce_candidates(
-            payload.retrieval_plan.ecommerce_query,
-            payload.slots.category,
-            limit=20,
-        )
-        ecommerce_candidates = normalize_ecommerce_candidates(raw_candidates, limit=5)
-        if not ecommerce_candidates:
-            blocked_sources.append({"source": "domestic_ecommerce", "reason": "no browser results returned"})
-    except Exception as exc:  # noqa: BLE001
-        ecommerce_candidates = []
-        blocked_sources.append({"source": "domestic_ecommerce", "reason": _augment_browser_block_reason(str(exc))})
+    raw_candidates: list[dict[str, Any]] = []
+    platform_failures: list[str] = []
+    empty_platforms: list[str] = []
+    for platform in ("jd", "taobao"):
+        try:
+            platform_candidates = await fetch_ecommerce_candidates_for_platform(
+                payload.retrieval_plan.ecommerce_query,
+                payload.slots.category,
+                platform,
+                limit=20,
+            )
+            if platform_candidates:
+                raw_candidates.extend(platform_candidates)
+            else:
+                empty_platforms.append(platform)
+        except Exception as exc:  # noqa: BLE001
+            platform_failures.append(f"{platform}: {_augment_browser_block_reason(str(exc))}")
+
+    ecommerce_candidates = normalize_ecommerce_candidates(raw_candidates, limit=5)
+    if ecommerce_candidates:
+        for reason in platform_failures:
+            blocked_sources.append({"source": "domestic_ecommerce", "reason": reason})
+        for platform in empty_platforms:
+            blocked_sources.append({"source": "domestic_ecommerce", "reason": f"{platform}: no browser results returned"})
+    elif platform_failures:
+        blocked_sources.append({"source": "domestic_ecommerce", "reason": "; ".join(platform_failures)})
+    else:
+        blocked_sources.append({"source": "domestic_ecommerce", "reason": "no browser results returned"})
 
     generated_xhs_queries = build_candidate_xhs_queries(ecommerce_candidates, payload.slots.category)
     if not generated_xhs_queries:
