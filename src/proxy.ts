@@ -10,7 +10,27 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Handle internationalization first
-  const intlResponse = intlMiddleware(request);
+  let intlResponse = intlMiddleware(request);
+  const rewriteTarget = intlResponse.headers.get('x-middleware-rewrite');
+  const redirectTarget = intlResponse.headers.get('location');
+
+  if (rewriteTarget && redirectTarget) {
+    const normalizedRedirectTarget = new URL(redirectTarget, request.url).href;
+
+    if (normalizedRedirectTarget === request.nextUrl.href) {
+      const normalizedResponse = NextResponse.rewrite(rewriteTarget);
+
+      intlResponse.headers.forEach((value, key) => {
+        if (key.toLowerCase() === 'location') {
+          return;
+        }
+
+        normalizedResponse.headers.set(key, value);
+      });
+
+      intlResponse = normalizedResponse;
+    }
+  }
 
   // Extract locale from pathname
   const locale = pathname.split('/')[1];
