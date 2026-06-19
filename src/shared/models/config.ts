@@ -16,6 +16,39 @@ export type Configs = Record<string, string>;
 
 export const CACHE_TAG_CONFIGS = 'configs';
 
+const MISSING_CONFIG_TABLE_PATTERNS = [
+  /\brelation\s+"?config"?\s+does\s+not\s+exist\b/i,
+  /\btable\b[^\n]*\bconfig\b[^\n]*\bdoesn'?t\s+exist\b/i,
+  /\bno\s+such\s+table:\s*config\b/i,
+];
+
+function isMissingConfigTableError(error: unknown): boolean {
+  let current = error;
+
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const message =
+      current instanceof Error
+        ? current.message
+        : typeof current === 'string'
+          ? current
+          : '';
+
+    if (
+      message &&
+      MISSING_CONFIG_TABLE_PATTERNS.some((pattern) => pattern.test(message))
+    ) {
+      return true;
+    }
+
+    current =
+      current && typeof current === 'object' && 'cause' in current
+        ? (current as { cause?: unknown }).cause
+        : null;
+  }
+
+  return false;
+}
+
 export async function saveConfigs(configs: Record<string, string>) {
   const result = await db().transaction(async (tx: any) => {
     const configEntries = Object.entries(configs);
@@ -57,7 +90,18 @@ export const getConfigs = unstable_cache(
       return configs;
     }
 
-    const result = await db().select().from(config);
+    let result;
+    try {
+      result = await db().select().from(config);
+    } catch (error) {
+      // Allow first deploys and fresh databases to build before the admin
+      // config table has been created.
+      if (isMissingConfigTableError(error)) {
+        return configs;
+      }
+      throw error;
+    }
+
     if (!result) {
       return configs;
     }
