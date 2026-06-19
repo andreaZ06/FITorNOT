@@ -1,0 +1,63 @@
+{
+  "metadata": {
+    "title": "FITorNOT",
+    "description": "跨平台消费决策助手，抓真实证据、过滤水分、给出明确结论。"
+  },
+  "search": {
+    "title": "下单前，先把商品看透",
+    "card_title": "描述你的商品和顾虑，附上链接也可以，FITorNOT 会帮你把跨平台信号拎清。",
+    "prompt_placeholder": "例如：我想买 Anker 10000 毫安的充电宝，但是我不知道它能不能上飞机呀",
+    "link_placeholder": "可选：粘贴京东、淘宝、小红书或其他平台链接",
+    "language_placeholder": "选择报告语言",
+    "submit": "开始审查"
+  },
+  "history": {
+    "title": "历史",
+    "description": "仅保留当前浏览器最近 3 条已完成报告。",
+    "empty": "还没有已完成的搜索记录。",
+    "verdict_veto": "高风险",
+    "verdict_caution": "需结合场景",
+    "verdict_fit": "整体适配",
+    "verdict_unknown": "证据不足"
+  },
+  "loading": {
+    "title": "正在生成决策报告",
+    "description": "我们正在抓取平台信息、过滤噪声，并交叉核对关键证据。",
+    "error_description": "这次请求还没成功出报告，你可以直接在这里重试。",
+    "error_title": "请求中断",
+    "status_title": "FITorNOT 审查中",
+    "retry": "重试",
+    "back": "返回搜索",
+    "step_collect": "采集商品参数与评论线索",
+    "step_filter": "清洗软文、水军与无效评价",
+    "step_compare": "交叉比对平台之间的冲突点",
+    "step_finalize": "生成最终决策结论"
+  },
+  "result": {
+    "empty_title": "这条结果已不存在或已过期",
+    "empty_description": "当前浏览器最近记录里没有找到对应报告。",
+    "back_to_search": "返回搜索",
+    "new_search": "发起新搜索",
+    "verdict_veto": "建议谨慎劝退",
+    "verdict_caution": "有条件可买",
+    "verdict_fit": "整体可入",
+    "verdict_unknown": "证据还不够",
+    "plan_query": "电商检索词",
+    "plan_xhs": "小红书探针词",
+    "hit_count": "命中证据数",
+    "blocked_sources": "受阻来源数",
+    "specs_title": "已核验参数",
+    "no_specs": "这次报告里没有返回可核验的官方参数。",
+    "query_meta_title": "查询上下文",
+    "user_input": "原始输入",
+    "user_language": "报告语言",
+    "user_profile": "识别到的使用场景",
+    "risks_title": "风险与注意点",
+    "core_scandals": "核心硬伤",
+    "no_core_scandals": "当前证据里没有捕捉到明确的高危硬伤。",
+    "soft_drawbacks": "软性缺点",
+    "no_soft_drawbacks": "当前证据里没有捕捉到明显的场景不匹配点。",
+    "report_title": "完整报告",
+    "history_hint": "最近记录仅保存在当前浏览器本地。"
+  }
+}

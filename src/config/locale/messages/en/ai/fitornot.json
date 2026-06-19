@@ -1,0 +1,63 @@
+{
+  "metadata": {
+    "title": "FITorNOT",
+    "description": "Cross-platform buying checks with live evidence, noise filtering, and a clear verdict."
+  },
+  "search": {
+    "title": "See Through the Listing Before You Buy",
+    "card_title": "Describe the product, add links if you have them, and let FITorNOT audit the real signal.",
+    "prompt_placeholder": "Example: I want to buy an Anker 10000mAh power bank, but can it go on a plane?",
+    "link_placeholder": "Optional links from JD, Taobao, Xiaohongshu, or anywhere else",
+    "language_placeholder": "Choose report language",
+    "submit": "Start Review"
+  },
+  "history": {
+    "title": "History",
+    "description": "Only the latest 3 finished reports are kept on this device.",
+    "empty": "No finished searches yet.",
+    "verdict_veto": "High risk",
+    "verdict_caution": "Needs context",
+    "verdict_fit": "Looks fit",
+    "verdict_unknown": "Need more evidence"
+  },
+  "loading": {
+    "title": "Review in Progress",
+    "description": "We are collecting platform evidence, stripping noise, and building a report you can actually trust.",
+    "error_description": "The request paused before the report was ready. You can retry from here.",
+    "error_title": "Request interrupted",
+    "status_title": "Running FITorNOT audit",
+    "retry": "Retry",
+    "back": "Back to search",
+    "step_collect": "Collecting listing details and review signals",
+    "step_filter": "Removing spam, fluff, and low-value comments",
+    "step_compare": "Checking conflicts across platforms",
+    "step_finalize": "Composing the final verdict"
+  },
+  "result": {
+    "empty_title": "This result is no longer available",
+    "empty_description": "The report was not found in your recent local history.",
+    "back_to_search": "Back to search",
+    "new_search": "New search",
+    "verdict_veto": "Hard warning",
+    "verdict_caution": "Usable with caveats",
+    "verdict_fit": "Generally a fit",
+    "verdict_unknown": "Not enough evidence",
+    "plan_query": "E-commerce query",
+    "plan_xhs": "Xiaohongshu probes",
+    "hit_count": "Evidence hits",
+    "blocked_sources": "Blocked sources",
+    "specs_title": "Verified specs",
+    "no_specs": "No verified specs were returned for this report.",
+    "query_meta_title": "Query context",
+    "user_input": "Original request",
+    "user_language": "Report language",
+    "user_profile": "Detected scenario",
+    "risks_title": "Risks and caveats",
+    "core_scandals": "Core red flags",
+    "no_core_scandals": "No hard red flags were captured in the current evidence.",
+    "soft_drawbacks": "Soft drawbacks",
+    "no_soft_drawbacks": "No scenario-specific drawbacks were captured in the current evidence.",
+    "report_title": "Full report",
+    "history_hint": "Recent reports are stored locally on this browser only."
+  }
+}

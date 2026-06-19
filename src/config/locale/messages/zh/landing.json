@@ -55,6 +55,12 @@
               "description": "与 AI 聊天机器人对话",
               "url": "/chat",
               "icon": "RiMessage2Line"
+            },
+            {
+              "title": "FITorNOT",
+              "description": "跨平台审查商品，帮你下单前先避坑",
+              "url": "/fitornot",
+              "icon": "RiSearchEyeLine"
             }
           ]
         },

@@ -55,6 +55,12 @@
               "description": "Chat with AI chatbot",
               "url": "/chat",
               "icon": "RiMessage2Line"
+            },
+            {
+              "title": "FITorNOT",
+              "description": "Audit a product across platforms before you buy",
+              "url": "/fitornot",
+              "icon": "RiSearchEyeLine"
             }
           ]
         },
