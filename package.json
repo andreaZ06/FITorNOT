@@ -19,6 +19,7 @@
   ],
   "scripts": {
     "dev": "next dev --turbopack",
+    "dev:fitornot": "powershell -ExecutionPolicy Bypass -File scripts/start-fitornot-dev.ps1",
     "build": "next build",
     "build:fast": "NODE_OPTIONS='--max-old-space-size=4096' next build",
     "start": "next start",
