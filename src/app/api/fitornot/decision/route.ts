@@ -6,6 +6,40 @@ type FitOrNotDecisionRequest = {
   targetLanguage?: string;
 };
 
+function isLocalHostname(hostname: string) {
+  const normalizedHostname = hostname.trim().toLowerCase();
+  return (
+    normalizedHostname === '127.0.0.1' ||
+    normalizedHostname === 'localhost' ||
+    normalizedHostname === '0.0.0.0' ||
+    normalizedHostname === '::1'
+  );
+}
+
+function resolveFitOrNotBackendBaseUrl() {
+  const configuredBaseUrl =
+    process.env.FITORNOT_API_BASE_URL?.trim() ||
+    envConfigs.fitornot_api_base_url?.trim() ||
+    'http://127.0.0.1:8000';
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(configuredBaseUrl);
+  } catch {
+    throw new Error(
+      `FITORNOT_API_BASE_URL is invalid: ${configuredBaseUrl}. Please provide a full http(s) origin.`
+    );
+  }
+
+  if (process.env.NODE_ENV === 'production' && isLocalHostname(parsedUrl.hostname)) {
+    throw new Error(
+      `FITORNOT_API_BASE_URL is pointing to localhost (${parsedUrl.origin}). Deploy the review-pitfall-checker-v2 backend to a public https URL and set FITORNOT_API_BASE_URL in Vercel before retrying.`
+    );
+  }
+
+  return parsedUrl.origin;
+}
+
 async function readUpstreamError(response: Response) {
   try {
     const payload = await response.json();
@@ -31,10 +65,7 @@ export async function POST(request: Request) {
       return respErr('invalid params');
     }
 
-    const baseUrl =
-      envConfigs.fitornot_api_base_url ||
-      process.env.FITORNOT_API_BASE_URL ||
-      'http://127.0.0.1:8000';
+    const baseUrl = resolveFitOrNotBackendBaseUrl();
     const response = await fetch(`${baseUrl}/api/v1/decision`, {
       method: 'POST',
       headers: {
