@@ -70,3 +70,4 @@ src/config/db/migrations*
 
 .chats
 .agents/
+.worktrees/
