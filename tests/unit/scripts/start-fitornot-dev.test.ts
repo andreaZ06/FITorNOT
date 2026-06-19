@@ -29,4 +29,17 @@ describe('FITorNOT dev launcher', () => {
     expect(script).toMatch(/"--port"[\s\S]*"\$BackendPort"/);
     expect(script).toMatch(/"--port"[\s\S]*"\$FrontendPort"/);
   });
+
+  it('loads the parent workspace env file and reuses a trusted Chrome CDP session when available', () => {
+    const script = readFileSync(
+      join(repoRoot, 'scripts/start-fitornot-dev.ps1'),
+      'utf8'
+    );
+
+    expect(script).toContain('$ParentEnvPath');
+    expect(script).toContain('Import-DotEnvFile $ParentEnvPath');
+    expect(script).toContain('FITORNOT_ENABLE_BROWSER_AUTOMATION');
+    expect(script).toContain('FITORNOT_BROWSER_CDP_URL');
+    expect(script).toContain('http://127.0.0.1:9222/json/version');
+  });
 });

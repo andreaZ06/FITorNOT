@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BackendDir = Join-Path $RepoRoot "review-pitfall-checker-v2"
 $BackendUrl = "http://${HostName}:$BackendPort"
+$ParentEnvPath = Join-Path (Split-Path (Split-Path $RepoRoot -Parent) -Parent) ".env"
 
 function Import-DotEnvFile {
   param([string]$Path)
@@ -76,9 +77,32 @@ function New-FitOrNotJob {
   } -ArgumentList $WorkingDirectory, $Command, $Arguments
 }
 
+function Test-HttpEndpoint {
+  param([string]$Url)
+
+  try {
+    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
+    return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+  } catch {
+    return $false
+  }
+}
+
+Import-DotEnvFile $ParentEnvPath
 Import-DotEnvFile (Join-Path $RepoRoot ".env")
 
 [Environment]::SetEnvironmentVariable("FITORNOT_API_BASE_URL", $BackendUrl, "Process")
+
+if (-not $env:FITORNOT_ENABLE_BROWSER_AUTOMATION) {
+  [Environment]::SetEnvironmentVariable("FITORNOT_ENABLE_BROWSER_AUTOMATION", "1", "Process")
+}
+
+if (
+  -not $env:FITORNOT_BROWSER_CDP_URL -and
+  (Test-HttpEndpoint "http://127.0.0.1:9222/json/version")
+) {
+  [Environment]::SetEnvironmentVariable("FITORNOT_BROWSER_CDP_URL", "http://127.0.0.1:9222", "Process")
+}
 
 if (-not $env:DEEPSEEK_API_KEY) {
   Write-Warning "DEEPSEEK_API_KEY is not set. The backend can start, but real decision generation may fail until the key is added to .env or your shell environment."
@@ -121,6 +145,10 @@ Write-Host "Starting FITorNOT local stack..."
 Write-Host "Backend:  $BackendUrl"
 Write-Host "Frontend: http://${HostName}:$FrontendPort/zh/fitornot"
 Write-Host "Proxy:    FITORNOT_API_BASE_URL=$env:FITORNOT_API_BASE_URL"
+Write-Host "Browser:  FITORNOT_ENABLE_BROWSER_AUTOMATION=$env:FITORNOT_ENABLE_BROWSER_AUTOMATION"
+if ($env:FITORNOT_BROWSER_CDP_URL) {
+  Write-Host "CDP:      FITORNOT_BROWSER_CDP_URL=$env:FITORNOT_BROWSER_CDP_URL"
+}
 Write-Host "Press Ctrl+C to stop both services."
 
 $backendJob = New-FitOrNotJob `
