@@ -128,6 +128,22 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(slots.model, "10000")
         self.assertIs(bound, sentinel)
 
+    def test_deepseek_prompt_structured_wrapper_accepts_raw_markdown_for_final_report(self):
+        module = importlib.import_module("main")
+
+        class FakeResponse:
+            content = "## Report\n- verdict: carry-on safe if the Wh label is visible"
+
+        class FakeClient:
+            async def ainvoke(self, _messages):
+                return FakeResponse()
+
+        llm = module._DeepSeekPromptStructuredLLM(FakeClient(), module.FinalReport)
+
+        report = asyncio.run(llm.ainvoke([("system", "render report"), ("user", "{}")]))
+
+        self.assertEqual(report.report, FakeResponse.content)
+
     def test_decision_graph_contains_required_nodes_and_edges(self):
         module = importlib.import_module("main")
 
@@ -749,7 +765,7 @@ class MainDecisionApiTest(unittest.TestCase):
 
         async def fake_xhs(queries, limit):
             self.assertEqual(limit, 10)
-            self.assertTrue(any("发热" in query or "虚标" in query for query in queries))
+            self.assertEqual(queries, ["Anker 10000mAh 充电宝 避雷"])
             return [{"query": queries[0], "notes": [], "comments": []}]
 
         module.fetch_ecommerce_candidates = fake_ecommerce
@@ -767,8 +783,9 @@ class MainDecisionApiTest(unittest.TestCase):
         )
 
         self.assertEqual(result.ecommerce_candidates[0]["title"], "Anker 10000mAh Nano")
+        self.assertEqual(len(result.ecommerce_candidates), 1)
         self.assertTrue(result.generated_xhs_queries)
-        self.assertTrue(any("Anker 10000mAh Nano" in query for query in result.generated_xhs_queries))
+        self.assertEqual(result.generated_xhs_queries, ["Anker 10000mAh 充电宝 避雷"])
 
     def test_domestic_recall_fetch_falls_back_cleanly_when_browser_tools_are_missing(self):
         module = importlib.import_module("main")
@@ -1427,6 +1444,62 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(queries[0], "Anker 候选1 避雷")
         self.assertEqual(queries[-1], "Anker 候选5 避雷")
 
+    def test_build_candidate_xhs_queries_compresses_listing_titles_for_known_power_bank_slots(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category=module.SUPPORTED_CATEGORIES[0], brand="Anker", model="10000", urls=[])
+
+        queries = module.build_candidate_xhs_queries(
+            [
+                {
+                    "title": "ANKER zolo安克【新3C认证上飞机】充电宝自带双c线10000毫安mAh大容量35W快充移动电源安卓苹果手机白",
+                    "price": "116.2",
+                    "shop_name": "Anker京东自营旗舰店",
+                    "url": "https://item.jd.com/100241293249.html",
+                    "platform": "jd",
+                }
+            ],
+            module.SUPPORTED_CATEGORIES[0],
+            slots=slots,
+        )
+
+        self.assertEqual(queries, ["Anker 10000mAh 充电宝 避雷"])
+
+    def test_normalize_ecommerce_candidates_filters_competitors_when_brand_and_capacity_are_known(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category=module.SUPPORTED_CATEGORIES[0], brand="Anker", model="10000", urls=[])
+
+        normalized = module.normalize_ecommerce_candidates(
+            [
+                {
+                    "title": "贝尔金（BELKIN）充电宝3C认证可上飞机 磁吸移动电源无线充iPhone手机15W快充 兼容MagSafe超薄小巧便携 沙色",
+                    "price": "192",
+                    "shop_name": "贝尔金京东自营旗舰店",
+                    "url": "https://item.jd.com/100223762865.html",
+                    "platform": "jd",
+                },
+                {
+                    "title": "ANKER zolo安克【新3C认证上飞机】充电宝自带双c线10000毫安mAh大容量35W快充移动电源安卓苹果手机白",
+                    "price": "116.2",
+                    "shop_name": "Anker京东自营旗舰店",
+                    "url": "https://item.jd.com/100241293249.html",
+                    "platform": "jd",
+                },
+                {
+                    "title": "ANKER安克充电宝【3C认证可上飞机】35W快充自带双typle-C线10000毫安移动电源苹果17iPhone华为小米 【蓝-双Type-C线】35W|10000mAh",
+                    "price": "132.05",
+                    "shop_name": "Anker官方旗舰店",
+                    "url": "https://item.jd.com/10210345327989.html",
+                    "platform": "jd",
+                },
+            ],
+            limit=5,
+            slots=slots,
+            retrieval_query="Anker 10000 充电宝",
+        )
+
+        self.assertEqual(len(normalized), 2)
+        self.assertTrue(all("anker" in item["title"].lower() or "安克" in item["title"] for item in normalized))
+        self.assertTrue(all("10000" in item["title"] or "1万" in item["title"] for item in normalized))
     def test_normalize_ecommerce_candidates_round_robins_across_platforms(self):
         module = importlib.import_module("main")
 

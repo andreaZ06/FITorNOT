@@ -431,6 +431,10 @@ class _DeepSeekPromptStructuredLLM:
             payload = _extract_json_payload_from_response(response)
             return self.schema.model_validate(payload)
         except Exception as exc:  # noqa: BLE001
+            if self.schema is FinalReport:
+                markdown_report = _response_text(response).strip()
+                if markdown_report:
+                    return FinalReport(report=markdown_report)
             raise RuntimeError(
                 f"Structured JSON parse failed for {self.schema.__name__}: {exc}"
             ) from exc
@@ -587,7 +591,7 @@ def _append_structured_json_instruction(value: Any, schema: type[BaseModel]) -> 
     return [("user", str(value)), ("system", instruction)]
 
 
-def _extract_json_payload_from_response(response: Any) -> Any:
+def _response_text(response: Any) -> str:
     content = getattr(response, "content", response)
     if isinstance(content, list):
         parts: list[str] = []
@@ -602,10 +606,12 @@ def _extract_json_payload_from_response(response: Any) -> Any:
             else:
                 text = getattr(item, "text", None)
                 parts.append(str(text if text is not None else item))
-        text = "\n".join(part for part in parts if part).strip()
-    else:
-        text = str(content).strip()
-    return _extract_json_payload_from_text(text)
+        return "\n".join(part for part in parts if part).strip()
+    return str(content).strip()
+
+
+def _extract_json_payload_from_response(response: Any) -> Any:
+    return _extract_json_payload_from_text(_response_text(response))
 
 
 def _extract_json_payload_from_text(text: str) -> Any:
@@ -1079,7 +1085,110 @@ async def fetch_ecommerce_candidates_for_platform(
     return await fetch_ecommerce_candidates(query, category, limit=limit)
 
 
-def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+BRAND_ALIASES: dict[str, tuple[str, ...]] = {
+    "anker": ("anker", "安克"),
+    "belkin": ("belkin", "贝尔金"),
+    "baseus": ("baseus", "倍思"),
+    "xiaomi": ("xiaomi", "小米"),
+    "philips": ("philips", "飞利浦"),
+    "ugreen": ("ugreen", "绿联"),
+    "romoss": ("romoss", "罗马仕"),
+}
+
+
+def _category_search_terms(category: str) -> tuple[str, ...]:
+    if category == SUPPORTED_CATEGORIES[0]:
+        return ("充电宝", "移动电源", "能量棒")
+    if category == SUPPORTED_CATEGORIES[1]:
+        return ("面膜",)
+    if category == SUPPORTED_CATEGORIES[2]:
+        return ("狗粮",)
+    return ()
+
+
+def _brand_terms(brand: str | None) -> tuple[str, ...]:
+    cleaned = str(brand or "").strip()
+    if not cleaned:
+        return ()
+    lowered = cleaned.lower()
+    aliases = BRAND_ALIASES.get(lowered)
+    if aliases:
+        return aliases
+    return (cleaned, lowered)
+
+
+def _capacity_terms(model: str | None, retrieval_query: str = "") -> tuple[str, ...]:
+    source_text = " ".join(part for part in [str(model or "").strip(), retrieval_query.strip()] if part)
+    match = re.search(r"(\d{4,6})", source_text)
+    if not match:
+        return ()
+    mah_value = int(match.group(1))
+    terms = {
+        str(mah_value),
+        f"{mah_value}mah",
+        f"{mah_value}毫安",
+    }
+    if mah_value % 10000 == 0:
+        wan_value = mah_value // 10000
+        terms.update({f"{wan_value}万", f"{wan_value}万mah", f"{wan_value}万毫安"})
+    return tuple(sorted(terms))
+
+
+def _extract_capacity_label(text: str) -> str:
+    numeric_match = re.search(r"(\d{4,6})\s*(mAh|毫安)?", text, re.IGNORECASE)
+    if numeric_match:
+        return f"{numeric_match.group(1)}mAh"
+    wan_match = re.search(r"(\d+)万\s*(mAh|毫安)?", text, re.IGNORECASE)
+    if wan_match:
+        return f"{int(wan_match.group(1)) * 10000}mAh"
+    return ""
+
+
+def _candidate_precision_score(
+    candidate: dict[str, Any],
+    slots: IntentSlots | None = None,
+    retrieval_query: str = "",
+) -> tuple[int, int]:
+    title = str(candidate.get("title", "")).strip()
+    shop_name = str(candidate.get("shop_name", "")).strip()
+    combined = f"{title} {shop_name}".lower()
+    score = 0
+    matched_hard_signals = 0
+
+    brand_terms = _brand_terms(slots.brand if slots else None)
+    if brand_terms:
+        if any(term.lower() in combined for term in brand_terms):
+            score += 8
+            matched_hard_signals += 1
+        else:
+            score -= 10
+
+    capacity_terms = _capacity_terms(slots.model if slots else None, retrieval_query)
+    if capacity_terms:
+        if any(term.lower() in combined for term in capacity_terms):
+            score += 5
+            matched_hard_signals += 1
+        else:
+            score -= 4
+
+    category_terms = _category_search_terms(slots.category if slots else "")
+    if category_terms:
+        if any(term.lower() in combined for term in category_terms):
+            score += 2
+        else:
+            score -= 2
+
+    if any(marker in shop_name for marker in ("自营", "官方", "旗舰")):
+        score += 1
+    return score, matched_hard_signals
+
+
+def normalize_ecommerce_candidates(
+    items: list[dict[str, Any]],
+    limit: int = 5,
+    slots: IntentSlots | None = None,
+    retrieval_query: str = "",
+) -> list[dict[str, Any]]:
     ordered_candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in items:
@@ -1097,16 +1206,44 @@ def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) 
                 "shop_name": str(item.get("shop_name", "")).strip(),
                 "url": str(item.get("url", "")).strip(),
                 "platform": str(item.get("platform", "search")).strip(),
+                "_precision_score": 0,
+                "_matched_hard_signals": 0,
             }
         )
         if len(ordered_candidates) >= limit * 4:
             break
     if len(ordered_candidates) <= 1:
-        return ordered_candidates[:limit]
+        return [
+            {key: value for key, value in candidate.items() if not key.startswith("_")}
+            for candidate in ordered_candidates[:limit]
+        ]
+
+    hard_filter_count = 0
+    if slots is not None:
+        hard_filter_count += int(bool(_brand_terms(slots.brand)))
+        hard_filter_count += int(bool(_capacity_terms(slots.model, retrieval_query)))
+    for candidate in ordered_candidates:
+        score, matched_hard_signals = _candidate_precision_score(candidate, slots=slots, retrieval_query=retrieval_query)
+        candidate["_precision_score"] = score
+        candidate["_matched_hard_signals"] = matched_hard_signals
+
+    precision_candidates = sorted(
+        ordered_candidates,
+        key=lambda candidate: candidate["_precision_score"],
+        reverse=True,
+    )
+    if hard_filter_count:
+        filtered_candidates = [
+            candidate
+            for candidate in precision_candidates
+            if candidate["_matched_hard_signals"] >= hard_filter_count and candidate["_precision_score"] >= 0
+        ]
+        if filtered_candidates:
+            precision_candidates = filtered_candidates
 
     grouped: dict[str, deque[dict[str, Any]]] = {}
     platform_order: list[str] = []
-    for candidate in ordered_candidates:
+    for candidate in precision_candidates:
         platform = candidate["platform"] or "search"
         if platform not in grouped:
             grouped[platform] = deque()
@@ -1114,7 +1251,10 @@ def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) 
         grouped[platform].append(candidate)
 
     if len(platform_order) <= 1:
-        return ordered_candidates[:limit]
+        return [
+            {key: value for key, value in candidate.items() if not key.startswith("_")}
+            for candidate in precision_candidates[:limit]
+        ]
 
     normalized: list[dict[str, Any]] = []
     while len(normalized) < limit:
@@ -1129,10 +1269,51 @@ def normalize_ecommerce_candidates(items: list[dict[str, Any]], limit: int = 5) 
                 break
         if not progressed:
             break
-    return normalized
+    return [
+        {key: value for key, value in candidate.items() if not key.startswith("_")}
+        for candidate in normalized
+    ]
 
 
-def build_candidate_xhs_queries(candidates: list[dict[str, Any]], category: str) -> list[str]:
+def _compact_candidate_subject(candidate: dict[str, Any], category: str, slots: IntentSlots | None = None) -> str:
+    title = str(candidate.get("title", "")).strip()
+    if slots is None:
+        return title
+
+    parts: list[str] = []
+    if slots.brand:
+        parts.append(slots.brand)
+
+    if slots.model and not re.fullmatch(r"\d{4,6}", slots.model):
+        parts.append(slots.model)
+
+    capacity_label = _extract_capacity_label(title) or _extract_capacity_label(slots.model or "")
+    if capacity_label:
+        parts.append(capacity_label)
+
+    category_terms = _category_search_terms(category)
+    if category_terms:
+        parts.append(category_terms[0])
+
+    deduped_parts: list[str] = []
+    seen_parts: set[str] = set()
+    for part in parts:
+        cleaned = str(part).strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen_parts:
+            continue
+        seen_parts.add(lowered)
+        deduped_parts.append(cleaned)
+    return " ".join(deduped_parts) or title
+
+
+def build_candidate_xhs_queries(
+    candidates: list[dict[str, Any]],
+    category: str,
+    slots: IntentSlots | None = None,
+) -> list[str]:
     negative_terms = {
         SUPPORTED_CATEGORIES[0]: ["避雷", "真实测评", "缺点"],
         SUPPORTED_CATEGORIES[1]: ["避雷", "刺痛", "缺点"],
@@ -1144,10 +1325,10 @@ def build_candidate_xhs_queries(candidates: list[dict[str, Any]], category: str)
     seen: set[str] = set()
     primary_probe = negative_terms[0]
     for candidate in candidates[:5]:
-        title = candidate.get("title", "").strip()
-        if not title:
+        subject = _compact_candidate_subject(candidate, category, slots=slots).strip()
+        if not subject:
             continue
-        query = f"{title} {primary_probe}"
+        query = f"{subject} {primary_probe}"
         if query in seen:
             continue
         seen.add(query)
@@ -1242,7 +1423,7 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
                 "platform": "jd",
             }
         ]
-        mock_queries = build_candidate_xhs_queries(mock_candidates, payload.slots.category) or list(
+        mock_queries = build_candidate_xhs_queries(mock_candidates, payload.slots.category, slots=payload.slots) or list(
             payload.retrieval_plan.xiaohongshu_queries
         )
         raw_data = mock_raw_platform_data(payload.slots, payload.retrieval_plan)
@@ -1276,7 +1457,12 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
         except Exception as exc:  # noqa: BLE001
             platform_failures.append(f"{platform}: {_augment_browser_block_reason(str(exc))}")
 
-    ecommerce_candidates = normalize_ecommerce_candidates(raw_candidates, limit=5)
+    ecommerce_candidates = normalize_ecommerce_candidates(
+        raw_candidates,
+        limit=5,
+        slots=payload.slots,
+        retrieval_query=payload.retrieval_plan.ecommerce_query,
+    )
     if ecommerce_candidates:
         for reason in platform_failures:
             blocked_sources.append({"source": "domestic_ecommerce", "reason": reason})
@@ -1287,7 +1473,11 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
     else:
         blocked_sources.append({"source": "domestic_ecommerce", "reason": "no browser results returned"})
 
-    generated_xhs_queries = build_candidate_xhs_queries(ecommerce_candidates, payload.slots.category)
+    generated_xhs_queries = build_candidate_xhs_queries(
+        ecommerce_candidates,
+        payload.slots.category,
+        slots=payload.slots,
+    )
     if not generated_xhs_queries:
         generated_xhs_queries = list(payload.retrieval_plan.xiaohongshu_queries)
 
