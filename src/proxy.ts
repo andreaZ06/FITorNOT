@@ -6,18 +6,43 @@ import { routing } from '@/core/i18n/config';
 
 const intlMiddleware = createIntlMiddleware(routing);
 
+function normalizeDefaultLocaleVisibleUrl(target: string, requestUrl: string) {
+  const normalizedUrl = new URL(target, requestUrl);
+  const defaultLocalePrefix = `/${routing.defaultLocale}`;
+
+  if (
+    normalizedUrl.pathname === defaultLocalePrefix ||
+    normalizedUrl.pathname.startsWith(`${defaultLocalePrefix}/`)
+  ) {
+    normalizedUrl.pathname =
+      normalizedUrl.pathname.slice(defaultLocalePrefix.length) || '/';
+  }
+
+  return normalizedUrl.href;
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const originalRequestHref = request.nextUrl.href;
+  const locale = pathname.split('/')[1];
+  const isValidLocale = routing.locales.includes(locale as any);
 
-  // Handle internationalization first
-  let intlResponse = intlMiddleware(request);
+  // Avoid running the locale middleware twice for internally localized requests.
+  let intlResponse = isValidLocale ? NextResponse.next() : intlMiddleware(request);
   const rewriteTarget = intlResponse.headers.get('x-middleware-rewrite');
   const redirectTarget = intlResponse.headers.get('location');
 
-  if (rewriteTarget && redirectTarget) {
+  if (!isValidLocale && rewriteTarget && redirectTarget) {
     const normalizedRedirectTarget = new URL(redirectTarget, request.url).href;
+    const normalizedVisibleRewriteTarget = normalizeDefaultLocaleVisibleUrl(
+      rewriteTarget,
+      request.url
+    );
 
-    if (normalizedRedirectTarget === request.nextUrl.href) {
+    if (
+      normalizedRedirectTarget === originalRequestHref ||
+      normalizedRedirectTarget === normalizedVisibleRewriteTarget
+    ) {
       const normalizedResponse = NextResponse.rewrite(rewriteTarget);
 
       intlResponse.headers.forEach((value, key) => {
@@ -33,8 +58,6 @@ export async function proxy(request: NextRequest) {
   }
 
   // Extract locale from pathname
-  const locale = pathname.split('/')[1];
-  const isValidLocale = routing.locales.includes(locale as any);
   const pathWithoutLocale = isValidLocale
     ? pathname.slice(locale.length + 1)
     : pathname;
