@@ -49,6 +49,7 @@ data*
 !review-pitfall-checker/data/
 !review-pitfall-checker/data/**
 review-pitfall-checker/data/results/
+!review-pitfall-checker-v2/data_cleaning.py
 *debug*
 
 *.db
@@ -71,3 +72,8 @@ src/config/db/migrations*
 .chats
 .agents/
 .worktrees/
+
+# FITorNOT backend local runtime artifacts
+review-pitfall-checker-v2/.browser-profile*
+review-pitfall-checker-v2/chrome*.log
+review-pitfall-checker-v2/tmp_*
