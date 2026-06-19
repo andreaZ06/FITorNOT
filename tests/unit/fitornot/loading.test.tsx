@@ -228,4 +228,33 @@ describe('FitOrNotLoading', () => {
       expect(pushMock).toHaveBeenCalledWith('/fitornot');
     });
   });
+
+  it('renders the redesigned loading screen instead of the generic progress card', async () => {
+    window.sessionStorage.setItem(
+      'fitornot:pending:entry-visual',
+      JSON.stringify({
+        id: 'entry-visual',
+        userRawInput: 'query',
+        targetLanguage: 'zh-CN',
+      })
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ code: -1, message: 'backend failed' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    render(<FitOrNotLoading entryId="entry-visual" />);
+
+    expect(screen.getByText(/loading\.title/i)).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /loading\.retry/i })).toBeInTheDocument();
+    });
+  });
 });

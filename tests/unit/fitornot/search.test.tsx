@@ -162,4 +162,27 @@ describe('FitOrNotSearch', () => {
 
     expect(screen.getByText('Anker 10000')).toBeInTheDocument();
   });
+
+  it('renders FITorNOT-only chrome without ShipAny or pricing copy', () => {
+    render(<FitOrNotSearch />);
+
+    expect(screen.getAllByText('FITorNOT').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/ShipAny/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pricing/i)).not.toBeInTheDocument();
+  });
+
+  it('renders the redesigned search surface controls', () => {
+    const { container } = render(<FitOrNotSearch />);
+
+    expect(screen.getByRole('button', { name: /history\.title/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /search\.submit/i })).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toBeInTheDocument();
+    expect(container.querySelector('[data-slot="card"]')).toBeNull();
+  });
+
+  it('shows the active report language inside the selector trigger', () => {
+    render(<FitOrNotSearch />);
+
+    expect(screen.getByText('中文')).toBeInTheDocument();
+  });
 });

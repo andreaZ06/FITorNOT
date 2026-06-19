@@ -1,14 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowLeft, LoaderCircle, RotateCcw } from 'lucide-react';
+import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 
 import { Link, useRouter } from '@/core/i18n/navigation';
 import { Button } from '@/shared/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/shared/components/ui/card';
-import { Progress } from '@/shared/components/ui/progress';
-import { Skeleton } from '@/shared/components/ui/skeleton';
 
 import {
   appendFitOrNotHistoryEntry,
@@ -17,8 +14,6 @@ import {
 } from './storage';
 import type { FitOrNotDecisionResponse } from './types';
 import { buildFitOrNotHistoryEntry } from './view-model';
-
-const LOADING_STEPS = [22, 51, 76, 92];
 
 type FitOrNotDecisionRouteResponse = {
   code?: number;
@@ -39,10 +34,19 @@ export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
   const [isSubmitting, setIsSubmitting] = useState(true);
   const [retryCount, setRetryCount] = useState(0);
 
-  const loadingProgress = useMemo(
-    () => LOADING_STEPS[Math.min(stepIndex, LOADING_STEPS.length - 1)] ?? 22,
-    [stepIndex]
+  const loadingMessages = useMemo(
+    () => [
+      t('loading.step_collect'),
+      t('loading.step_filter'),
+      t('loading.step_compare'),
+      t('loading.step_finalize'),
+    ],
+    [t]
   );
+
+  const activeMessage =
+    loadingMessages[Math.min(stepIndex, loadingMessages.length - 1)] ??
+    t('loading.step_collect');
 
   useEffect(() => {
     if (errorMessage || !isSubmitting) {
@@ -51,12 +55,12 @@ export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
 
     const intervalId = window.setInterval(() => {
       setStepIndex((currentValue) =>
-        currentValue >= LOADING_STEPS.length - 1 ? 0 : currentValue + 1
+        currentValue >= loadingMessages.length - 1 ? 0 : currentValue + 1
       );
-    }, 1200);
+    }, 1800);
 
     return () => window.clearInterval(intervalId);
-  }, [errorMessage, isSubmitting]);
+  }, [errorMessage, isSubmitting, loadingMessages.length]);
 
   useEffect(() => {
     if (requestStartedRef.current) {
@@ -138,80 +142,83 @@ export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
   };
 
   return (
-    <section className="flex min-h-[calc(100vh-4rem)] items-center justify-center py-16">
-      <div className="container">
-        <div className="mx-auto flex max-w-3xl flex-col gap-6">
-          <div className="space-y-2 text-center">
-            <p className="text-muted-foreground text-sm tracking-[0.3em] uppercase">
-              FITorNOT
-            </p>
-            <h1 className="text-3xl font-semibold tracking-tight md:text-5xl">
-              {t('loading.title')}
-            </h1>
-            <p className="text-muted-foreground mx-auto max-w-2xl text-sm md:text-base">
-              {errorMessage ? t('loading.error_description') : t('loading.description')}
-            </p>
-          </div>
+    <section className="relative flex min-h-screen items-center justify-center overflow-hidden px-5 py-10">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(175,202,226,0.48),_transparent_42%)]" />
+      <div className="absolute inset-x-0 top-0 h-40 bg-[linear-gradient(180deg,_rgba(255,255,255,0.7),_transparent)]" />
 
-          <Card className="border-border/60 shadow-sm">
-            <CardHeader className="pb-4">
-              <CardTitle className="flex items-center gap-3 text-lg font-medium">
-                {errorMessage ? (
-                  <AlertCircle className="text-destructive size-5" />
-                ) : (
-                  <LoaderCircle className="text-primary size-5 animate-spin" />
-                )}
-                {errorMessage ? t('loading.error_title') : t('loading.status_title')}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-5">
-              {errorMessage ? (
-                <>
-                  <div className="bg-destructive/8 text-destructive rounded-lg border px-4 py-3 text-sm">
-                    {errorMessage}
-                  </div>
-                  <div className="flex flex-col gap-3 sm:flex-row">
-                    <Button type="button" className="sm:flex-1" onClick={handleRetry}>
-                      <RotateCcw data-icon="inline-start" />
-                      {t('loading.retry')}
-                    </Button>
-                    <Button variant="outline" asChild className="sm:flex-1">
-                      <Link href="/fitornot">
-                        <ArrowLeft data-icon="inline-start" />
-                        {t('loading.back')}
-                      </Link>
-                    </Button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="space-y-3">
-                    <Progress value={loadingProgress} />
-                    <div className="grid gap-3 md:grid-cols-3">
-                      <Skeleton className="h-20" />
-                      <Skeleton className="h-20" />
-                      <Skeleton className="h-20" />
-                    </div>
-                  </div>
-                  <div className="grid gap-3 text-sm sm:grid-cols-2">
-                    <div className="bg-muted rounded-lg px-4 py-3">
-                      {t('loading.step_collect')}
-                    </div>
-                    <div className="bg-muted rounded-lg px-4 py-3">
-                      {t('loading.step_filter')}
-                    </div>
-                    <div className="bg-muted rounded-lg px-4 py-3">
-                      {t('loading.step_compare')}
-                    </div>
-                    <div className="bg-muted rounded-lg px-4 py-3">
-                      {t('loading.step_finalize')}
-                    </div>
-                  </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+      <div className="relative mx-auto flex w-full max-w-[920px] flex-col items-center justify-center gap-10 text-center">
+        {!errorMessage ? (
+          <>
+            <div className="relative flex h-[270px] w-[270px] items-center justify-center md:h-[330px] md:w-[330px]">
+              <div className="absolute inset-0 rounded-full border border-[#8CA6BD]/20" />
+              <div className="absolute inset-[-6%] rounded-full border border-[#8CA6BD]/12" />
+              <div className="absolute inset-3 animate-spin rounded-full border-2 border-transparent border-t-[#8CA6BD] border-r-[#8CA6BD]/20" />
+              <div className="absolute inset-[18%] rounded-[42%] bg-[linear-gradient(135deg,_rgba(175,202,226,0.82),_rgba(140,166,189,0.94))] blur-2xl" />
+            </div>
+
+            <div className="max-w-[620px] space-y-4">
+              <p className="text-xs font-semibold tracking-[0.34em] text-slate-400 uppercase">
+                FITorNOT
+              </p>
+              <h1 className="text-3xl font-semibold tracking-tight text-slate-900 md:text-5xl">
+                {t('loading.title')}
+              </h1>
+              <p className="text-lg leading-8 text-slate-500">{activeMessage}</p>
+              <p className="text-sm leading-6 text-slate-400">{t('loading.description')}</p>
+            </div>
+
+            <div className="flex items-center justify-center gap-2 pt-2">
+              <span className="size-2 animate-bounce rounded-full bg-[#8CA6BD] [animation-delay:-0.3s]" />
+              <span className="size-2 animate-bounce rounded-full bg-[#8CA6BD] [animation-delay:-0.15s]" />
+              <span className="size-2 animate-bounce rounded-full bg-[#8CA6BD]" />
+            </div>
+
+            <p className="pt-8 text-[11px] font-medium tracking-[0.4em] text-slate-300 uppercase">
+              FITorNOT VERDICT ENGINE ACTIVE
+            </p>
+          </>
+        ) : (
+          <div className="w-full max-w-[580px] rounded-[30px] border border-rose-200 bg-white/92 p-6 shadow-[0_24px_48px_rgba(211,223,232,0.35)] backdrop-blur md:p-8">
+            <div className="space-y-4 text-left">
+              <div className="space-y-2 text-center">
+                <p className="text-xs font-semibold tracking-[0.34em] text-slate-400 uppercase">
+                  FITorNOT
+                </p>
+                <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
+                  {t('loading.error_title')}
+                </h1>
+                <p className="text-sm leading-6 text-slate-500">
+                  {t('loading.error_description')}
+                </p>
+              </div>
+
+              <div className="rounded-[20px] border border-rose-200 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-700">
+                {errorMessage}
+              </div>
+
+              <div className="flex flex-col gap-3 pt-2 sm:flex-row">
+                <Button
+                  type="button"
+                  className="h-11 flex-1 rounded-xl bg-[#8CA6BD] text-white hover:bg-[#486176]"
+                  onClick={handleRetry}
+                >
+                  <RotateCcw data-icon="inline-start" />
+                  {t('loading.retry')}
+                </Button>
+                <Button
+                  variant="outline"
+                  asChild
+                  className="h-11 flex-1 rounded-xl border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                >
+                  <Link href="/fitornot">
+                    <ArrowLeft data-icon="inline-start" />
+                    {t('loading.back')}
+                  </Link>
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

@@ -1,3 +1,4 @@
+export * from './shell';
 export * from './search';
 export * from './loading';
 export * from './result';

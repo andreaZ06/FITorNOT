@@ -1,9 +1,7 @@
 import type { ReactNode } from 'react';
 import { setRequestLocale } from 'next-intl/server';
 
-function FitOrNotShell({ children }: { children: ReactNode }) {
-  return <>{children}</>;
-}
+import { FitOrNotShell } from '@/shared/blocks/fitornot';
 
 export default async function FitOrNotLayout({
   children,

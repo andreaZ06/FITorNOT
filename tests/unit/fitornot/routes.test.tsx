@@ -14,6 +14,9 @@ vi.mock('@/shared/lib/seo', () => ({
 }));
 
 vi.mock('@/shared/blocks/fitornot', () => ({
+  FitOrNotShell: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="fitornot-shell">{children}</div>
+  ),
   FitOrNotSearch: () => <div data-testid="fitornot-search" />,
   FitOrNotLoading: ({ entryId }: { entryId: string }) => (
     <div data-entry-id={entryId} data-testid="fitornot-loading" />
@@ -44,6 +47,7 @@ describe('FITorNOT standalone routes', () => {
     );
 
     expect(setRequestLocaleMock).toHaveBeenCalledWith('en');
+    expect(screen.getByTestId('fitornot-shell')).toBeInTheDocument();
     expect(screen.getByText('Standalone FitOrNot')).toBeInTheDocument();
     expect(screen.queryByText('ShipAny Two')).not.toBeInTheDocument();
   });

@@ -183,4 +183,24 @@ describe('FitOrNotResult', () => {
       '/fitornot'
     );
   });
+
+  it('renders the standalone FITorNOT result surface without generic card chrome', async () => {
+    window.localStorage.setItem(
+      'fitornot:history:v1',
+      JSON.stringify([
+        buildHistoryEntry('entry-1', '2026-06-19T08:01:00.000Z', 'Anker 10000'),
+      ])
+    );
+
+    const { container } = render(<FitOrNotResult entryId="entry-1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Anker 10000' })).toBeInTheDocument();
+    });
+
+    expect(screen.getAllByText('FITorNOT').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/ShipAny/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pricing/i)).not.toBeInTheDocument();
+    expect(container.querySelector('[data-slot="card"]')).toBeNull();
+  });
 });

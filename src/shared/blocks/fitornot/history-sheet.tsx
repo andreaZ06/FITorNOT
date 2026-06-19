@@ -56,13 +56,13 @@ function HistoryEntryButton({
   return (
     <button
       type="button"
-      className="hover:bg-muted/70 flex w-full flex-col gap-2 rounded-lg border px-4 py-3 text-left transition-colors"
+      className="flex w-full flex-col gap-2 rounded-[20px] border border-slate-200 bg-slate-50/55 px-4 py-4 text-left transition-colors hover:bg-slate-50"
       onClick={() => onSelect(entry.id)}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="truncate font-medium">{entry.summaryTitle}</p>
-          <div className="text-muted-foreground mt-1 flex items-center gap-2 text-xs">
+          <p className="truncate text-sm font-semibold text-slate-800">{entry.summaryTitle}</p>
+          <div className="mt-1 flex items-center gap-2 text-xs text-slate-400">
             <Clock3 className="size-3.5" />
             <span>{formatTimestamp(entry.createdAt)}</span>
           </div>
@@ -94,22 +94,30 @@ export function FitOrNotHistorySheet({ trigger }: FitOrNotHistorySheetProps) {
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild>
         {trigger ?? (
-          <Button variant="outline" type="button">
+          <Button
+            variant="outline"
+            type="button"
+            className="rounded-full border-slate-200 bg-white/80 px-4 text-slate-600 shadow-[0_8px_24px_rgba(211,223,232,0.35)] hover:bg-white"
+          >
             <History data-icon="inline-start" />
             {t('history.title')}
           </Button>
         )}
       </SheetTrigger>
-      <SheetContent side="right" className="gap-0">
-        <SheetHeader className="border-b pb-4">
-          <SheetTitle>{t('history.title')}</SheetTitle>
-          <SheetDescription>{t('history.description')}</SheetDescription>
+      <SheetContent side="right" className="gap-0 border-l border-slate-200 bg-white px-0">
+        <SheetHeader className="border-b border-slate-200 px-6 pb-5 pt-8">
+          <SheetTitle className="text-left text-xl font-semibold text-slate-900">
+            {t('history.title')}
+          </SheetTitle>
+          <SheetDescription className="text-left text-sm leading-6 text-slate-500">
+            {t('history.description')}
+          </SheetDescription>
         </SheetHeader>
 
         <ScrollArea className="h-full">
-          <div className="flex flex-col gap-3 p-4">
+          <div className="flex flex-col gap-3 p-5">
             {historyEntries.length === 0 ? (
-              <div className="text-muted-foreground rounded-lg border border-dashed px-4 py-8 text-center text-sm">
+              <div className="rounded-[20px] border border-dashed border-slate-200 px-4 py-10 text-center text-sm leading-6 text-slate-400">
                 {t('history.empty')}
               </div>
             ) : (
