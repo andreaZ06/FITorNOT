@@ -1,0 +1,45 @@
+import json
+from pathlib import Path
+import unittest
+
+
+class DeploymentArtifactsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project_root = Path(__file__).resolve().parents[1]
+
+    def test_required_railway_artifacts_exist_and_include_expected_runtime_settings(self) -> None:
+        dockerfile = self.project_root / "Dockerfile"
+        dockerignore = self.project_root / ".dockerignore"
+        env_example = self.project_root / ".env.example"
+        railway_config = self.project_root / "railway.json"
+
+        self.assertTrue(dockerfile.exists(), "Dockerfile should exist for Railway deployment.")
+        self.assertTrue(
+            dockerignore.exists(),
+            ".dockerignore should exist to keep local state out of the image.",
+        )
+        self.assertTrue(
+            env_example.exists(),
+            "A backend-specific .env.example should document Railway environment variables.",
+        )
+        self.assertTrue(
+            railway_config.exists(),
+            "railway.json should exist to document deployment health checks.",
+        )
+
+        dockerfile_text = dockerfile.read_text(encoding="utf-8")
+        dockerignore_text = dockerignore.read_text(encoding="utf-8")
+        env_example_text = env_example.read_text(encoding="utf-8")
+        railway_payload = json.loads(railway_config.read_text(encoding="utf-8"))
+
+        self.assertIn("uvicorn main:app", dockerfile_text)
+        self.assertIn("${PORT:-8000}", dockerfile_text)
+        self.assertIn(".browser-profile/", dockerignore_text)
+        self.assertIn("DEEPSEEK_API_KEY", env_example_text)
+        self.assertIn("BRIGHTDATA_API_KEY", env_example_text)
+        self.assertIn("NEON_DATABASE_URL", env_example_text)
+        self.assertEqual("/health", railway_payload["deploy"]["healthcheckPath"])
+
+
+if __name__ == "__main__":
+    unittest.main()

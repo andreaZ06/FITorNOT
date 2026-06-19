@@ -94,3 +94,75 @@ Run the local test suite:
 ```bash
 python -m unittest discover -s tests
 ```
+
+## Railway Deployment
+
+Use Railway to deploy this backend as a separate web service from the Next.js
+frontend.
+
+### 1. Configure the service root
+
+This repository is a monorepo. In Railway, set the service root directory to:
+
+```bash
+review-pitfall-checker-v2
+```
+
+That ensures Railway picks up the local `Dockerfile`, `railway.json`, and
+backend-only environment variables.
+
+### 2. Set environment variables
+
+Required:
+
+```bash
+DEEPSEEK_API_KEY=your-deepseek-key
+```
+
+Recommended:
+
+```bash
+BRIGHTDATA_API_KEY=your-brightdata-key
+NEON_DATABASE_URL=postgresql://...
+```
+
+Safe Railway defaults:
+
+```bash
+FITORNOT_ENABLE_BROWSER_AUTOMATION=0
+FITORNOT_BROWSER_HEADLESS=true
+FITORNOT_BROWSER_TIMEOUT_MS=45000
+FITORNOT_BROWSER_SCROLL_ROUNDS=2
+```
+
+Notes:
+
+- Keep browser automation disabled on Railway unless you have explicitly
+  validated a browser-capable runtime.
+- Without browser automation, the API should degrade through its existing
+  fallback paths instead of inventing evidence.
+
+### 3. Deploy and verify health
+
+After the service is live, verify the health endpoint:
+
+```bash
+curl https://your-railway-domain.up.railway.app/health
+```
+
+Expected response:
+
+```json
+{"status":"ok","service":"FITorNOT"}
+```
+
+### 4. Connect the Vercel frontend
+
+In your Vercel project, set:
+
+```bash
+FITORNOT_API_BASE_URL=https://your-railway-domain.up.railway.app
+```
+
+Do not point Vercel to `http://127.0.0.1:8000`. That address only works for
+local development and will fail in production.
