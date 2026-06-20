@@ -66,6 +66,9 @@ Notes:
 - On headless hosts such as Railway, inject a trusted Playwright
   `storageState` payload through `FITORNOT_BROWSER_STORAGE_STATE`. The value
   can be raw JSON or a `base64:`-prefixed JSON payload.
+- The storage-state exporter automatically trims the payload down to the
+  supported FITorNOT domains (`jd.com`, `taobao.com`, `tmall.com`,
+  `xiaohongshu.com`) so the secret stays within common hosting limits.
 - If you already operate a trusted remote Chrome session, point
   `FITORNOT_BROWSER_CDP_URL` at it instead.
 - If browser automation is unavailable or blocked, the workflow degrades to the
@@ -153,7 +156,8 @@ Notes:
   present in the container.
 - For trusted logged-in sessions on Railway, prefer
   `FITORNOT_BROWSER_STORAGE_STATE`. You can paste a raw Playwright
-  `storageState` JSON object or a `base64:`-prefixed encoded payload.
+  `storageState` JSON object or a `base64:`-prefixed encoded payload. The
+  exporter trims it to the FITorNOT-supported domains automatically.
 - If you manage an external trusted browser yourself, set
   `FITORNOT_BROWSER_CDP_URL` instead of storage state.
 - Set `FITORNOT_ENABLE_BROWSER_AUTOMATION=0` only when you want to force the
@@ -170,8 +174,9 @@ Playwright `storageState` from the FITorNOT browser profile.
 powershell -ExecutionPolicy Bypass -File .\start_fitornot_browser.ps1
 ```
 
-2. After login is complete, close the browser window so the profile files are
-   fully flushed to disk.
+2. Keep that browser window open after login. The exporter will try to connect
+   to the live local browser first, which is more reliable than copying the
+   profile on Windows.
 
 3. Export the storage state:
 

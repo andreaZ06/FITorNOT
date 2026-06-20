@@ -13,6 +13,31 @@ import storage_state_export as module
 
 
 class StorageStateExportHelpersTest(unittest.TestCase):
+    def test_filter_storage_state_payload_keeps_supported_domains_only(self):
+        payload = {
+            "cookies": [
+                {"name": "jd", "value": "1", "domain": ".jd.com", "path": "/"},
+                {"name": "tb", "value": "2", "domain": "passport.taobao.com", "path": "/"},
+                {"name": "xhs", "value": "3", "domain": ".xiaohongshu.com", "path": "/"},
+                {"name": "noise", "value": "4", "domain": ".bing.com", "path": "/"},
+            ],
+            "origins": [
+                {"origin": "https://www.xiaohongshu.com", "localStorage": []},
+                {"origin": "https://www.bing.com", "localStorage": []},
+            ],
+        }
+
+        filtered = module.filter_storage_state_payload(payload)
+
+        self.assertEqual(
+            [cookie["domain"] for cookie in filtered["cookies"]],
+            [".jd.com", "passport.taobao.com", ".xiaohongshu.com"],
+        )
+        self.assertEqual(
+            [origin["origin"] for origin in filtered["origins"]],
+            ["https://www.xiaohongshu.com"],
+        )
+
     def test_encode_storage_state_for_env_returns_base64_prefixed_value(self):
         payload = {
             "cookies": [{"name": "sid", "value": "x", "domain": ".jd.com", "path": "/"}],
@@ -90,7 +115,10 @@ class StorageStateExportCliTest(unittest.TestCase):
     def test_export_storage_state_prefers_live_cdp_browser_when_marker_exists(self):
         export_module = importlib.import_module("export_fitornot_storage_state")
         payload = {
-            "cookies": [{"name": "sid", "value": "x", "domain": ".jd.com", "path": "/"}],
+            "cookies": [
+                {"name": "sid", "value": "x", "domain": ".jd.com", "path": "/"},
+                {"name": "noise", "value": "x", "domain": ".bing.com", "path": "/"},
+            ],
             "origins": [],
         }
 
@@ -129,6 +157,7 @@ class StorageStateExportCliTest(unittest.TestCase):
                 return None
 
         chromium = FakeChromium()
+        written_payload = None
 
         with tempfile.TemporaryDirectory() as profile_dir, tempfile.TemporaryDirectory() as output_dir:
             marker_path = Path(profile_dir) / "cdp-url.txt"
@@ -137,6 +166,8 @@ class StorageStateExportCliTest(unittest.TestCase):
 
             with patch.object(export_module, "get_async_playwright", return_value=lambda: FakePlaywrightContextManager(chromium)):
                 summary = asyncio.run(export_module.export_storage_state(Path(profile_dir), output_path))
+            written_payload = json.loads(output_path.read_text(encoding="utf-8"))
 
         self.assertEqual(chromium.connected, ["http://127.0.0.1:9222"])
         self.assertEqual(summary["output_path"], str(output_path))
+        self.assertEqual(written_payload["cookies"], [{"name": "sid", "value": "x", "domain": ".jd.com", "path": "/"}])
