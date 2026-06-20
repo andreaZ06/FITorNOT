@@ -91,6 +91,13 @@ def write_storage_state_file(payload: dict[str, Any], output_path: Path) -> Path
     return output_path
 
 
+def write_storage_state_env_file(payload: dict[str, Any], output_path: Path) -> Path:
+    env_value = encode_storage_state_for_env(payload)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(env_value, encoding="utf-8")
+    return output_path
+
+
 def assert_profile_dir_exists(profile_dir: Path) -> Path:
     if not profile_dir.exists():
         raise FileNotFoundError(f"Profile directory does not exist: {profile_dir}")
@@ -101,8 +108,10 @@ def assert_profile_dir_exists(profile_dir: Path) -> Path:
 
 def build_export_summary(payload: dict[str, Any], output_path: Path) -> dict[str, str]:
     env_value = encode_storage_state_for_env(payload)
+    env_output_path = output_path.with_suffix(".env")
     return {
         "output_path": str(output_path),
+        "env_output_path": str(env_output_path),
         "env_value": env_value,
         "env_assignment": f"FITORNOT_BROWSER_STORAGE_STATE={env_value}",
     }

@@ -13,6 +13,7 @@ from storage_state_export import (
     build_export_summary,
     resolve_profile_dir,
     validate_storage_state_payload,
+    write_storage_state_env_file,
     write_storage_state_file,
 )
 
@@ -48,6 +49,7 @@ async def _export_from_live_cdp_browser(cdp_url: str, output_path: Path) -> dict
         payload = validate_storage_state_payload(await browser.contexts[0].storage_state())
 
     write_storage_state_file(payload, output_path)
+    write_storage_state_env_file(payload, output_path.with_suffix(".env"))
     return build_export_summary(payload, output_path)
 
 
@@ -70,6 +72,7 @@ async def _export_from_copied_profile(profile_dir: Path, output_path: Path) -> d
                 await context.close()
 
     write_storage_state_file(payload, output_path)
+    write_storage_state_env_file(payload, output_path.with_suffix(".env"))
     return build_export_summary(payload, output_path)
 
 
@@ -113,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("FITorNOT storage state exported.")
     print(f"JSON file: {summary['output_path']}")
+    print(f"Value-only env file: {summary['env_output_path']}")
     print("Paste this into Railway:")
     print(summary["env_assignment"])
     return 0

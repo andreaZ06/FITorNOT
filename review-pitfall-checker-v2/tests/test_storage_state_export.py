@@ -73,6 +73,23 @@ class StorageStateExportHelpersTest(unittest.TestCase):
             self.assertEqual(written, output_path)
             self.assertEqual(json.loads(output_path.read_text(encoding="utf-8")), payload)
 
+    def test_write_storage_state_env_file_persists_value_only(self):
+        payload = {
+            "cookies": [{"name": "sid", "value": "x", "domain": ".jd.com", "path": "/"}],
+            "origins": [],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "storage-state.env"
+
+            written = module.write_storage_state_env_file(payload, output_path)
+
+            self.assertEqual(written, output_path)
+            env_value = output_path.read_text(encoding="utf-8")
+            self.assertTrue(env_value.startswith("base64:"))
+            decoded = base64.b64decode(env_value[len("base64:") :]).decode("utf-8")
+            self.assertEqual(json.loads(decoded), payload)
+
 
 class StorageStateExportCliTest(unittest.TestCase):
     def test_build_export_summary_includes_railway_env_value(self):
@@ -88,6 +105,17 @@ class StorageStateExportCliTest(unittest.TestCase):
         self.assertTrue(summary["env_value"].startswith("base64:"))
         self.assertIn("FITORNOT_BROWSER_STORAGE_STATE=", summary["env_assignment"])
 
+    def test_build_export_summary_includes_env_file_path(self):
+        payload = {
+            "cookies": [{"name": "sid", "value": "x", "domain": ".jd.com", "path": "/"}],
+            "origins": [],
+        }
+        output_path = Path("C:/tmp/storage-state.json")
+
+        summary = module.build_export_summary(payload, output_path)
+
+        self.assertEqual(summary["env_output_path"], str(output_path.with_suffix(".env")))
+
     def test_assert_profile_dir_exists_rejects_missing_directory(self):
         with self.assertRaisesRegex(FileNotFoundError, "Profile directory does not exist"):
             module.assert_profile_dir_exists(Path("C:/definitely-missing-fitornot-profile"))
@@ -97,6 +125,7 @@ class StorageStateExportCliTest(unittest.TestCase):
         stdout = io.StringIO()
         summary = {
             "output_path": "C:/tmp/storage-state.json",
+            "env_output_path": "C:/tmp/storage-state.env",
             "env_value": "base64:encoded-value",
             "env_assignment": "FITORNOT_BROWSER_STORAGE_STATE=base64:encoded-value",
         }
