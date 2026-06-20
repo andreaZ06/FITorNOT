@@ -55,6 +55,19 @@ class DeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("base64:", readme_text)
         self.assertIn("FITORNOT_BROWSER_CDP_URL", readme_text)
 
+    def test_readme_documents_storage_state_export_command_for_railway(self) -> None:
+        readme = self.project_root / "README.md"
+        readme_text = readme.read_text(encoding="utf-8")
+
+        self.assertIn("export_fitornot_storage_state.py", readme_text)
+        self.assertIn("FITORNOT_BROWSER_STORAGE_STATE=", readme_text)
+
+    def test_env_example_mentions_local_export_script(self) -> None:
+        env_example = self.project_root / ".env.example"
+        env_text = env_example.read_text(encoding="utf-8")
+
+        self.assertIn("export_fitornot_storage_state.py", env_text)
+
     def test_repo_gitignore_excludes_local_browser_profiles_and_debug_artifacts(self) -> None:
         gitignore = self.repo_root / ".gitignore"
         self.assertTrue(gitignore.exists(), "Repo .gitignore should exist for Railway upload filtering.")

@@ -159,7 +159,37 @@ Notes:
 - Set `FITORNOT_ENABLE_BROWSER_AUTOMATION=0` only when you want to force the
   API into its degraded, non-browser fallback path.
 
-### 3. Deploy and verify health
+### 3. Export a trusted storage state locally
+
+If you want Railway to reuse your local logged-in browser session, export a
+Playwright `storageState` from the FITorNOT browser profile.
+
+1. Launch the local FITorNOT browser profile and log in:
+
+```bash
+powershell -ExecutionPolicy Bypass -File .\start_fitornot_browser.ps1
+```
+
+2. After login is complete, close the browser window so the profile files are
+   fully flushed to disk.
+
+3. Export the storage state:
+
+```bash
+python export_fitornot_storage_state.py --output outputs/fitornot-storage-state.json
+```
+
+4. Copy the printed single-line value into Railway exactly as:
+
+```bash
+FITORNOT_BROWSER_STORAGE_STATE=base64:...
+```
+
+The exporter writes a readable JSON file for inspection and also prints the
+full `FITORNOT_BROWSER_STORAGE_STATE=` assignment so you can paste it directly
+into Railway secrets.
+
+### 4. Deploy and verify health
 
 After the service is live, verify the health endpoint:
 
@@ -173,7 +203,7 @@ Expected response:
 {"status":"ok","service":"FITorNOT"}
 ```
 
-### 4. Connect the Vercel frontend
+### 5. Connect the Vercel frontend
 
 In your Vercel project, set:
 

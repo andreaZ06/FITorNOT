@@ -38,3 +38,20 @@ def write_storage_state_file(payload: dict[str, Any], output_path: Path) -> Path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     return output_path
+
+
+def assert_profile_dir_exists(profile_dir: Path) -> Path:
+    if not profile_dir.exists():
+        raise FileNotFoundError(f"Profile directory does not exist: {profile_dir}")
+    if not profile_dir.is_dir():
+        raise FileNotFoundError(f"Profile path is not a directory: {profile_dir}")
+    return profile_dir
+
+
+def build_export_summary(payload: dict[str, Any], output_path: Path) -> dict[str, str]:
+    env_value = encode_storage_state_for_env(payload)
+    return {
+        "output_path": str(output_path),
+        "env_value": env_value,
+        "env_assignment": f"FITORNOT_BROWSER_STORAGE_STATE={env_value}",
+    }
