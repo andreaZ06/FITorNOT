@@ -64,6 +64,15 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
         self.assertEqual(config["mode"], "cdp")
         self.assertEqual(config["cdp_url"], "http://127.0.0.1:9222")
 
+    def test_build_browser_session_config_uses_bundled_chromium_on_railway(self):
+        module = importlib.import_module("domestic_browser")
+
+        with patch.dict(os.environ, {"RAILWAY_PROJECT_ID": "railway-project"}, clear=True):
+            config = module.build_browser_session_config()
+
+        self.assertEqual(config["mode"], "persistent")
+        self.assertIsNone(config["channel"])
+
     def test_detect_platform_block_reason_identifies_jd_login_wall(self):
         module = importlib.import_module("domestic_browser")
 

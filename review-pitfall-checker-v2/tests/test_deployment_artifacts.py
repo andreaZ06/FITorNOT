@@ -36,10 +36,12 @@ class DeploymentArtifactsTest(unittest.TestCase):
 
         self.assertIn("uvicorn main:app", dockerfile_text)
         self.assertIn("${PORT:-8000}", dockerfile_text)
+        self.assertIn("playwright install --with-deps chromium", dockerfile_text)
         self.assertIn(".browser-profile/", dockerignore_text)
         self.assertIn("DEEPSEEK_API_KEY", env_example_text)
-        self.assertIn("BRIGHTDATA_API_KEY", env_example_text)
+        self.assertNotIn("BRIGHTDATA_API_KEY", env_example_text)
         self.assertIn("NEON_DATABASE_URL", env_example_text)
+        self.assertIn("FITORNOT_ENABLE_BROWSER_AUTOMATION=1", env_example_text)
         self.assertEqual("/health", railway_payload["deploy"]["healthcheckPath"])
 
     def test_repo_gitignore_excludes_local_browser_profiles_and_debug_artifacts(self) -> None:

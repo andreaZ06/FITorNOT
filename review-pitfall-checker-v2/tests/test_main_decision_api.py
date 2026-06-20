@@ -915,6 +915,23 @@ class MainDecisionApiTest(unittest.TestCase):
 
         self.assertIs(adapter, fake_adapter)
 
+    def test_default_browser_adapter_enables_automatically_on_railway(self):
+        module = importlib.import_module("main")
+        fake_adapter = object()
+        original_adapter_class = module.PlaywrightDomesticBrowserAdapter
+        os.environ.pop("FITORNOT_ENABLE_BROWSER_AUTOMATION", None)
+        os.environ["RAILWAY_PROJECT_ID"] = "railway-project"
+        module.set_domestic_browser_adapter(None)
+        module.PlaywrightDomesticBrowserAdapter = lambda: fake_adapter
+
+        try:
+            adapter = module.build_default_domestic_browser_adapter()
+        finally:
+            module.PlaywrightDomesticBrowserAdapter = original_adapter_class
+            os.environ.pop("RAILWAY_PROJECT_ID", None)
+
+        self.assertIs(adapter, fake_adapter)
+
     def test_local_intent_parser_detects_power_bank_from_plain_chinese_input(self):
         module = importlib.import_module("main")
 

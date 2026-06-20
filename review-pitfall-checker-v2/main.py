@@ -997,7 +997,18 @@ _DOMESTIC_BROWSER_ADAPTER: Any = None
 
 
 def _browser_automation_enabled() -> bool:
-    return os.getenv("FITORNOT_ENABLE_BROWSER_AUTOMATION", "").strip().lower() in {"1", "true", "yes", "on"}
+    raw = os.getenv("FITORNOT_ENABLE_BROWSER_AUTOMATION")
+    if raw is not None and raw.strip():
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return any(
+        os.getenv(name, "").strip()
+        for name in (
+            "RAILWAY_PROJECT_ID",
+            "RAILWAY_SERVICE_ID",
+            "RAILWAY_ENVIRONMENT_ID",
+            "RAILWAY_DEPLOYMENT_ID",
+        )
+    )
 
 
 def _browser_profile_dir() -> Path:
@@ -1037,8 +1048,8 @@ def get_domestic_browser_adapter() -> Any:
 def _browser_adapter_unavailable_error() -> RuntimeError:
     return RuntimeError(
         "Playwright browser adapter is unavailable. Install it with `pip install playwright`, run "
-        "`playwright install chromium`, and set `FITORNOT_ENABLE_BROWSER_AUTOMATION=1` before using domestic "
-        "browser recall."
+        "`playwright install chromium`, and enable it with `FITORNOT_ENABLE_BROWSER_AUTOMATION=1` when running "
+        "outside Railway before using domestic browser recall."
     )
 
 

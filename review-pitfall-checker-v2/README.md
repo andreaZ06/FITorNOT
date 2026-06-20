@@ -122,25 +122,29 @@ DEEPSEEK_API_KEY=your-deepseek-key
 Recommended:
 
 ```bash
-BRIGHTDATA_API_KEY=your-brightdata-key
 NEON_DATABASE_URL=postgresql://...
 ```
 
-Safe Railway defaults:
+Recommended Railway defaults:
 
 ```bash
-FITORNOT_ENABLE_BROWSER_AUTOMATION=0
+FITORNOT_ENABLE_BROWSER_AUTOMATION=1
 FITORNOT_BROWSER_HEADLESS=true
 FITORNOT_BROWSER_TIMEOUT_MS=45000
 FITORNOT_BROWSER_SCROLL_ROUNDS=2
+FITORNOT_BROWSER_CHANNEL=
 ```
 
 Notes:
 
-- Keep browser automation disabled on Railway unless you have explicitly
-  validated a browser-capable runtime.
-- Without browser automation, the API should degrade through its existing
-  fallback paths instead of inventing evidence.
+- The Railway Docker image now provisions Playwright plus bundled Chromium
+  during build, so browser recall should work without a separate system Chrome
+  install.
+- Leave `FITORNOT_BROWSER_CHANNEL` unset on Railway so Playwright launches its
+  bundled Chromium instead of looking for a branded Chrome binary that is not
+  present in the container.
+- Set `FITORNOT_ENABLE_BROWSER_AUTOMATION=0` only when you want to force the
+  API into its degraded, non-browser fallback path.
 
 ### 3. Deploy and verify health
 

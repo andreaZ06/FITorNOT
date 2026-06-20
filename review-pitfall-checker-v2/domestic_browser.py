@@ -41,6 +41,26 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _running_in_railway() -> bool:
+    return any(
+        os.getenv(name, "").strip()
+        for name in (
+            "RAILWAY_PROJECT_ID",
+            "RAILWAY_SERVICE_ID",
+            "RAILWAY_ENVIRONMENT_ID",
+            "RAILWAY_DEPLOYMENT_ID",
+        )
+    )
+
+
+def _default_browser_channel() -> str | None:
+    if _running_in_railway():
+        return None
+    if os.name == "nt":
+        return DEFAULT_BROWSER_CHANNEL
+    return None
+
+
 def _cdp_url_marker_path(profile_dir: Path | str | None) -> Path | None:
     if not profile_dir:
         return None
@@ -68,7 +88,11 @@ def _default_profile_source_root() -> Path | None:
 
 def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[str, Any]:
     cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip() or (_read_cdp_url_marker(profile_dir) or "")
-    channel = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip() or DEFAULT_BROWSER_CHANNEL
+    raw_channel = os.getenv("FITORNOT_BROWSER_CHANNEL")
+    if raw_channel is None:
+        channel = _default_browser_channel()
+    else:
+        channel = raw_channel.strip() or None
     user_agent = os.getenv("FITORNOT_BROWSER_USER_AGENT", DEFAULT_BROWSER_USER_AGENT).strip() or DEFAULT_BROWSER_USER_AGENT
     source_root = os.getenv("FITORNOT_BROWSER_PROFILE_SOURCE_DIR", "").strip()
     if source_root:
@@ -618,19 +642,23 @@ class PlaywrightDomesticBrowserAdapter:
             self.profile_dir.mkdir(parents=True, exist_ok=True)
             if session_config.get("sync_system_profile") and session_config.get("profile_source_root"):
                 sync_browser_profile(session_config["profile_source_root"], self.profile_dir)
-            context = await playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_dir),
-                headless=self.headless,
-                channel=session_config["channel"],
-                locale="zh-CN",
-                viewport={"width": 1440, "height": 1080},
-                user_agent=session_config["user_agent"],
-                extra_http_headers=session_config["extra_http_headers"],
-                args=[
+            launch_kwargs = {
+                "user_data_dir": str(self.profile_dir),
+                "headless": self.headless,
+                "locale": "zh-CN",
+                "viewport": {"width": 1440, "height": 1080},
+                "user_agent": session_config["user_agent"],
+                "extra_http_headers": session_config["extra_http_headers"],
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--start-maximized",
                     "--lang=zh-CN",
                 ],
+            }
+            if session_config.get("channel"):
+                launch_kwargs["channel"] = session_config["channel"]
+            context = await playwright.chromium.launch_persistent_context(
+                **launch_kwargs,
             )
             try:
                 yield context
