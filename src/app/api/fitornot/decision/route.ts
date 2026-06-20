@@ -1,6 +1,8 @@
 import { envConfigs } from '@/config';
 import { respData, respErr } from '@/shared/lib/resp';
 
+export const maxDuration = 60;
+
 type FitOrNotDecisionRequest = {
   userRawInput?: string;
   targetLanguage?: string;
@@ -41,8 +43,13 @@ function resolveFitOrNotBackendBaseUrl() {
 }
 
 async function readUpstreamError(response: Response) {
+  const text = (await response.text()).trim();
+  if (!text) {
+    return response.statusText || 'unknown upstream error';
+  }
+
   try {
-    const payload = await response.json();
+    const payload = JSON.parse(text);
     if (typeof payload?.detail === 'string' && payload.detail.trim()) {
       return payload.detail.trim();
     }
@@ -50,10 +57,29 @@ async function readUpstreamError(response: Response) {
       return payload.message.trim();
     }
   } catch {
-    // Ignore JSON parsing errors and fall back to status text.
+    return text.replace(/\s+/g, ' ').trim().slice(0, 240);
   }
 
-  return response.statusText || 'unknown upstream error';
+  return response.statusText || text.replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+async function readUpstreamPayload(response: Response) {
+  const text = (await response.text()).trim();
+  if (!text) {
+    return { payload: null, rawText: '' };
+  }
+
+  try {
+    return {
+      payload: JSON.parse(text),
+      rawText: text,
+    };
+  } catch {
+    return {
+      payload: null,
+      rawText: text,
+    };
+  }
 }
 
 export async function POST(request: Request) {
@@ -84,7 +110,15 @@ export async function POST(request: Request) {
       );
     }
 
-    const payload = await response.json();
+    const { payload, rawText } = await readUpstreamPayload(response);
+    if (!payload) {
+      return respErr(
+        `FITorNOT backend returned a non-JSON response: ${rawText
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 240)}`
+      );
+    }
 
     return respData(payload);
   } catch (error) {

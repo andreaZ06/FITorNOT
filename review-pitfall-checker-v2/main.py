@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, NotRequired, Optional, TypedDict
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from data_cleaning import clean_and_filter_data as _base_clean_and_filter_data
@@ -57,6 +58,12 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://fitornot.site",
+    "https://www.fitornot.site",
+)
 SUPPORTED_CATEGORIES = ("充电宝", "面膜", "狗粮", "其他")
 URL_PATTERN = re.compile(r"https?://[^\s,，]+", re.IGNORECASE)
 
@@ -2458,7 +2465,27 @@ def _json_from_messages(value: Any) -> dict[str, Any]:
     return json.loads(text)
 
 
+def resolve_allowed_origins(raw_value: str | None = None) -> list[str]:
+    configured = raw_value if raw_value is not None else os.getenv("FITORNOT_ALLOWED_ORIGINS", "")
+    candidates = [item.strip() for item in configured.split(",") if item.strip()]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for origin in (*DEFAULT_ALLOWED_ORIGINS, *candidates):
+        if origin in seen:
+            continue
+        seen.add(origin)
+        ordered.append(origin)
+    return ordered
+
+
 app = FastAPI(title="FITorNOT Decision API", version="0.3.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=resolve_allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/api/v1/decision", response_model=DecisionResponse)

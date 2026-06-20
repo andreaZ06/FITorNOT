@@ -162,6 +162,16 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn(("analyzer_node", "scenario_adapter_node"), edge_pairs)
         self.assertIn(("scenario_adapter_node", "generator_node"), edge_pairs)
 
+    def test_fastapi_app_enables_cors_for_fitornot_frontend_origins(self):
+        module = importlib.import_module("main")
+
+        allowed_origins = module.resolve_allowed_origins()
+        middleware_classes = [item.cls.__name__ for item in module.app.user_middleware]
+
+        self.assertIn("https://fitornot.site", allowed_origins)
+        self.assertIn("https://www.fitornot.site", allowed_origins)
+        self.assertIn("CORSMiddleware", middleware_classes)
+
     def test_system_prompts_are_attached_to_all_five_nodes(self):
         module = importlib.import_module("main")
 

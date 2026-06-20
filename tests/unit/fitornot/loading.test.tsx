@@ -143,6 +143,46 @@ describe('FitOrNotLoading', () => {
     expect(window.sessionStorage.getItem('fitornot:pending:entry-1')).toBeNull();
   });
 
+  it('calls the Python backend directly when a backend base URL is provided', async () => {
+    window.sessionStorage.setItem(
+      'fitornot:pending:entry-direct',
+      JSON.stringify({
+        id: 'entry-direct',
+        userRawInput: '我想买 Anker 10000 毫安的充电宝',
+        targetLanguage: 'zh-CN',
+      })
+    );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(buildResponse()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <FitOrNotLoading entryId="entry-direct" apiBaseUrl="https://backend.fitornot.site/" />
+    );
+
+    await waitFor(() => {
+      expect(replaceMock).toHaveBeenCalledWith('/fitornot/result/entry-direct');
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://backend.fitornot.site/api/v1/decision',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+        }),
+        body: JSON.stringify({
+          user_raw_input: '我想买 Anker 10000 毫安的充电宝',
+          target_language: 'zh-CN',
+        }),
+      })
+    );
+  });
+
   it('shows an error state and keeps the pending request when the request fails', async () => {
     window.sessionStorage.setItem(
       'fitornot:pending:entry-2',
@@ -170,6 +210,35 @@ describe('FitOrNotLoading', () => {
 
     expect(replaceMock).not.toHaveBeenCalled();
     expect(window.sessionStorage.getItem('fitornot:pending:entry-2')).not.toBeNull();
+  });
+
+  it('shows a readable error when the response body is plain text instead of JSON', async () => {
+    window.sessionStorage.setItem(
+      'fitornot:pending:entry-timeout',
+      JSON.stringify({
+        id: 'entry-timeout',
+        userRawInput: 'query',
+        targetLanguage: 'zh-CN',
+      })
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('An error occurred with your deployment FUNCTION_INVOCATION_TIMEOUT', {
+          status: 504,
+          headers: { 'Content-Type': 'text/plain' },
+        })
+      )
+    );
+
+    render(<FitOrNotLoading entryId="entry-timeout" />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/FUNCTION_INVOCATION_TIMEOUT/i)).toBeInTheDocument();
+    });
+
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem('fitornot:pending:entry-timeout')).not.toBeNull();
   });
 
   it('retries the request from the loading page after a failure', async () => {

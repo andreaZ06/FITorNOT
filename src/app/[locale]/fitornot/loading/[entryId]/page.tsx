@@ -17,5 +17,10 @@ export default async function FitOrNotLoadingPage({
   const { locale, entryId } = await params;
   setRequestLocale(locale);
 
-  return <FitOrNotLoading entryId={entryId} />;
+  return (
+    <FitOrNotLoading
+      entryId={entryId}
+      apiBaseUrl={process.env.FITORNOT_API_BASE_URL ?? null}
+    />
+  );
 }

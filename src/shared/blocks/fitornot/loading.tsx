@@ -12,20 +12,15 @@ import {
   clearPendingFitOrNotRequest,
   getPendingFitOrNotRequest,
 } from './storage';
-import type { FitOrNotDecisionResponse } from './types';
+import { requestFitOrNotDecision } from './request';
 import { buildFitOrNotHistoryEntry } from './view-model';
-
-type FitOrNotDecisionRouteResponse = {
-  code?: number;
-  message?: string;
-  data?: FitOrNotDecisionResponse;
-};
 
 type FitOrNotLoadingProps = {
   entryId: string;
+  apiBaseUrl?: string | null;
 };
 
-export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
+export function FitOrNotLoading({ entryId, apiBaseUrl }: FitOrNotLoadingProps) {
   const t = useTranslations('ai.fitornot');
   const router = useRouter();
   const requestStartedRef = useRef(false);
@@ -71,7 +66,6 @@ export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
 
     const pendingRequest = getPendingFitOrNotRequest(entryId);
     if (!pendingRequest) {
-      setIsSubmitting(false);
       router.push('/fitornot');
       return;
     }
@@ -83,21 +77,11 @@ export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
         setIsSubmitting(true);
         setErrorMessage(null);
 
-        const response = await fetch('/api/fitornot/decision', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            userRawInput: pendingRequest.userRawInput,
-            targetLanguage: pendingRequest.targetLanguage,
-          }),
+        const decision = await requestFitOrNotDecision({
+          userRawInput: pendingRequest.userRawInput,
+          targetLanguage: pendingRequest.targetLanguage,
+          apiBaseUrl,
         });
-
-        const payload = (await response.json()) as FitOrNotDecisionRouteResponse;
-        if (!response.ok || payload.code !== 0 || !payload.data) {
-          throw new Error(payload.message || 'FITorNOT request failed');
-        }
 
         if (!isActive) {
           return;
@@ -108,7 +92,7 @@ export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
             id: entryId,
             userRawInput: pendingRequest.userRawInput,
             targetLanguage: pendingRequest.targetLanguage,
-            response: payload.data,
+            response: decision,
           })
         );
         clearPendingFitOrNotRequest(entryId);
@@ -131,7 +115,7 @@ export function FitOrNotLoading({ entryId }: FitOrNotLoadingProps) {
     return () => {
       isActive = false;
     };
-  }, [entryId, retryCount, router]);
+  }, [apiBaseUrl, entryId, retryCount, router]);
 
   const handleRetry = () => {
     requestStartedRef.current = false;
