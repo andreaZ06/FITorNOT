@@ -1612,6 +1612,46 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn("start_fitornot_browser.ps1", result.blocked_sources[0]["reason"])
         self.assertIn("log in once", result.blocked_sources[1]["reason"])
 
+    def test_domestic_recall_fetch_uses_railway_storage_state_hint_when_trusted_session_is_required(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category=module.SUPPORTED_CATEGORIES[0], brand="Anker", model="10000", urls=[])
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        class FakeAdapter:
+            profile_dir = Path("/app/.browser-profile")
+
+        async def blocked_ecommerce(_query, _category, limit):
+            self.assertEqual(limit, 20)
+            raise RuntimeError("JD search login required: use a trusted browser session.")
+
+        async def blocked_xhs(_queries, limit):
+            self.assertEqual(limit, 10)
+            raise RuntimeError("Xiaohongshu search login required: use a trusted browser session.")
+
+        module.fetch_ecommerce_candidates = blocked_ecommerce
+        module.fetch_xiaohongshu_feedback = blocked_xhs
+        module.set_domestic_browser_adapter(FakeAdapter())
+        os.environ["RAILWAY_PROJECT_ID"] = "railway-project"
+
+        try:
+            result = asyncio.run(
+                module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                        user_raw_input="I want to buy an Anker 10000mAh power bank for flights.",
+                        slots=slots,
+                        retrieval_plan=retrieval_plan,
+                        use_mock=False,
+                    )
+                )
+            )
+        finally:
+            os.environ.pop("RAILWAY_PROJECT_ID", None)
+
+        self.assertEqual(result.fetch_status, "partial_failed")
+        self.assertIn("FITORNOT_BROWSER_STORAGE_STATE", result.blocked_sources[0]["reason"])
+        self.assertIn("FITORNOT_BROWSER_CDP_URL", result.blocked_sources[0]["reason"])
+        self.assertNotIn("start_fitornot_browser.ps1", result.blocked_sources[0]["reason"])
+
     def test_domestic_recall_fetch_records_platform_level_block_when_other_source_succeeds(self):
         module = importlib.import_module("main")
         slots = module.IntentSlots(category=module.SUPPORTED_CATEGORIES[0], brand="Anker", model="10000", urls=[])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -61,6 +62,21 @@ def _default_browser_channel() -> str | None:
     return None
 
 
+def _read_storage_state_from_env() -> dict[str, Any] | None:
+    raw = os.getenv("FITORNOT_BROWSER_STORAGE_STATE", "").strip()
+    if not raw:
+        return None
+
+    payload = raw
+    if raw.startswith("base64:"):
+        payload = base64.b64decode(raw[len("base64:") :]).decode("utf-8")
+
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise ValueError("FITORNOT_BROWSER_STORAGE_STATE must decode to a JSON object.")
+    return parsed
+
+
 def _cdp_url_marker_path(profile_dir: Path | str | None) -> Path | None:
     if not profile_dir:
         return None
@@ -94,17 +110,25 @@ def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[
     else:
         channel = raw_channel.strip() or None
     user_agent = os.getenv("FITORNOT_BROWSER_USER_AGENT", DEFAULT_BROWSER_USER_AGENT).strip() or DEFAULT_BROWSER_USER_AGENT
+    storage_state = _read_storage_state_from_env()
     source_root = os.getenv("FITORNOT_BROWSER_PROFILE_SOURCE_DIR", "").strip()
     if source_root:
         profile_source_root = Path(source_root)
     else:
         profile_source_root = _default_profile_source_root()
+    if cdp_url:
+        mode = "cdp"
+    elif storage_state is not None:
+        mode = "storage_state"
+    else:
+        mode = "persistent"
     return {
-        "mode": "cdp" if cdp_url else "persistent",
+        "mode": mode,
         "cdp_url": cdp_url or None,
         "channel": channel,
         "user_agent": user_agent,
         "extra_http_headers": {"Accept-Language": DEFAULT_ACCEPT_LANGUAGE},
+        "storage_state": storage_state,
         "profile_source_root": str(profile_source_root) if profile_source_root else None,
         "sync_system_profile": _env_flag(
             "FITORNOT_BROWSER_SYNC_SYSTEM_PROFILE",
@@ -633,6 +657,31 @@ class PlaywrightDomesticBrowserAdapter:
                         viewport={"width": 1440, "height": 1080},
                         user_agent=session_config["user_agent"],
                         extra_http_headers=session_config["extra_http_headers"],
+                    )
+                    yield context
+                finally:
+                    await browser.close()
+                return
+
+            if session_config["mode"] == "storage_state":
+                launch_kwargs = {
+                    "headless": self.headless,
+                    "args": [
+                        "--disable-blink-features=AutomationControlled",
+                        "--start-maximized",
+                        "--lang=zh-CN",
+                    ],
+                }
+                if session_config.get("channel"):
+                    launch_kwargs["channel"] = session_config["channel"]
+                browser = await playwright.chromium.launch(**launch_kwargs)
+                try:
+                    context = await browser.new_context(
+                        locale="zh-CN",
+                        viewport={"width": 1440, "height": 1080},
+                        user_agent=session_config["user_agent"],
+                        extra_http_headers=session_config["extra_http_headers"],
+                        storage_state=session_config["storage_state"],
                     )
                     yield context
                 finally:

@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sqlite3
 import tempfile
@@ -72,6 +73,32 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
 
         self.assertEqual(config["mode"], "persistent")
         self.assertIsNone(config["channel"])
+
+    def test_build_browser_session_config_reads_storage_state_from_env(self):
+        module = importlib.import_module("domestic_browser")
+        storage_state = {
+            "cookies": [
+                {
+                    "name": "sid",
+                    "value": "cookie-value",
+                    "domain": ".jd.com",
+                    "path": "/",
+                }
+            ],
+            "origins": [],
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "FITORNOT_BROWSER_STORAGE_STATE": json.dumps(storage_state, ensure_ascii=False),
+            },
+            clear=True,
+        ):
+            config = module.build_browser_session_config()
+
+        self.assertEqual(config["mode"], "storage_state")
+        self.assertEqual(config["storage_state"], storage_state)
 
     def test_detect_platform_block_reason_identifies_jd_login_wall(self):
         module = importlib.import_module("domestic_browser")

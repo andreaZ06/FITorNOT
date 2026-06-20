@@ -1000,6 +1000,10 @@ def _browser_automation_enabled() -> bool:
     raw = os.getenv("FITORNOT_ENABLE_BROWSER_AUTOMATION")
     if raw is not None and raw.strip():
         return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return _running_in_railway()
+
+
+def _running_in_railway() -> bool:
     return any(
         os.getenv(name, "").strip()
         for name in (
@@ -1054,6 +1058,12 @@ def _browser_adapter_unavailable_error() -> RuntimeError:
 
 
 def _trusted_session_bootstrap_hint() -> str:
+    if _running_in_railway():
+        return (
+            "Set FITORNOT_BROWSER_STORAGE_STATE to a trusted Playwright storageState JSON payload "
+            "(or prefix it with `base64:`), or connect a trusted Chrome session via "
+            "FITORNOT_BROWSER_CDP_URL."
+        )
     adapter = get_domestic_browser_adapter()
     profile_dir = Path(getattr(adapter, "profile_dir", _browser_profile_dir()))
     launcher_script = Path(__file__).resolve().parent / "start_fitornot_browser.ps1"

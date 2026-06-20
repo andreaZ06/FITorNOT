@@ -42,7 +42,18 @@ class DeploymentArtifactsTest(unittest.TestCase):
         self.assertNotIn("BRIGHTDATA_API_KEY", env_example_text)
         self.assertIn("NEON_DATABASE_URL", env_example_text)
         self.assertIn("FITORNOT_ENABLE_BROWSER_AUTOMATION=1", env_example_text)
+        self.assertIn("FITORNOT_BROWSER_STORAGE_STATE", env_example_text)
         self.assertEqual("/health", railway_payload["deploy"]["healthcheckPath"])
+
+    def test_readme_documents_trusted_browser_session_options_for_railway(self) -> None:
+        readme = self.project_root / "README.md"
+        self.assertTrue(readme.exists(), "README should exist for Railway deployment guidance.")
+
+        readme_text = readme.read_text(encoding="utf-8")
+
+        self.assertIn("FITORNOT_BROWSER_STORAGE_STATE", readme_text)
+        self.assertIn("base64:", readme_text)
+        self.assertIn("FITORNOT_BROWSER_CDP_URL", readme_text)
 
     def test_repo_gitignore_excludes_local_browser_profiles_and_debug_artifacts(self) -> None:
         gitignore = self.repo_root / ".gitignore"

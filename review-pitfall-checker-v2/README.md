@@ -53,6 +53,8 @@ FITORNOT_BROWSER_HEADLESS=false
 FITORNOT_BROWSER_TIMEOUT_MS=45000
 FITORNOT_BROWSER_SCROLL_ROUNDS=2
 FITORNOT_ENABLE_BROWSER_AUTOMATION=1
+FITORNOT_BROWSER_STORAGE_STATE=
+FITORNOT_BROWSER_CDP_URL=
 ```
 
 Notes:
@@ -61,6 +63,11 @@ Notes:
   manual login for Taobao or Xiaohongshu if needed.
 - Login state is stored in the persistent profile directory and will be reused
   across runs.
+- On headless hosts such as Railway, inject a trusted Playwright
+  `storageState` payload through `FITORNOT_BROWSER_STORAGE_STATE`. The value
+  can be raw JSON or a `base64:`-prefixed JSON payload.
+- If you already operate a trusted remote Chrome session, point
+  `FITORNOT_BROWSER_CDP_URL` at it instead.
 - If browser automation is unavailable or blocked, the workflow degrades to the
   existing Bright Data fallback without inventing comments.
 
@@ -133,6 +140,7 @@ FITORNOT_BROWSER_HEADLESS=true
 FITORNOT_BROWSER_TIMEOUT_MS=45000
 FITORNOT_BROWSER_SCROLL_ROUNDS=2
 FITORNOT_BROWSER_CHANNEL=
+FITORNOT_BROWSER_STORAGE_STATE=
 ```
 
 Notes:
@@ -143,6 +151,11 @@ Notes:
 - Leave `FITORNOT_BROWSER_CHANNEL` unset on Railway so Playwright launches its
   bundled Chromium instead of looking for a branded Chrome binary that is not
   present in the container.
+- For trusted logged-in sessions on Railway, prefer
+  `FITORNOT_BROWSER_STORAGE_STATE`. You can paste a raw Playwright
+  `storageState` JSON object or a `base64:`-prefixed encoded payload.
+- If you manage an external trusted browser yourself, set
+  `FITORNOT_BROWSER_CDP_URL` instead of storage state.
 - Set `FITORNOT_ENABLE_BROWSER_AUTOMATION=0` only when you want to force the
   API into its degraded, non-browser fallback path.
 
