@@ -12,6 +12,19 @@ type FitOrNotDecisionRequest = {
   apiBaseUrl?: string | null;
 };
 
+function isTransportLevelFetchError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const normalizedMessage = error.message.trim().toLowerCase();
+  return (
+    normalizedMessage === 'failed to fetch' ||
+    normalizedMessage.includes('networkerror') ||
+    normalizedMessage.includes('load failed')
+  );
+}
+
 function normalizeApiBaseUrl(value?: string | null): string | null {
   const trimmed = value?.trim();
   if (!trimmed) {
@@ -121,12 +134,19 @@ export async function requestFitOrNotDecision(
 ): Promise<FitOrNotDecisionResponse> {
   const normalizedBaseUrl = normalizeApiBaseUrl(payload.apiBaseUrl);
   if (normalizedBaseUrl) {
-    return requestDirect({
-      ...payload,
-      apiBaseUrl: normalizedBaseUrl,
-    });
+    try {
+      return await requestDirect({
+        ...payload,
+        apiBaseUrl: normalizedBaseUrl,
+      });
+    } catch (error) {
+      if (!isTransportLevelFetchError(error)) {
+        throw error;
+      }
+
+      return requestViaProxy(payload);
+    }
   }
 
   return requestViaProxy(payload);
 }
-
