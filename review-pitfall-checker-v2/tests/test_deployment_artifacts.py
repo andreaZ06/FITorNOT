@@ -77,6 +77,8 @@ class DeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("review-pitfall-checker-v2/.browser-profile*", gitignore_text)
         self.assertIn("review-pitfall-checker-v2/chrome*.log", gitignore_text)
         self.assertIn("review-pitfall-checker-v2/tmp_*", gitignore_text)
+        self.assertIn("review-pitfall-checker-v2/outputs/fitornot-storage-state.json", gitignore_text)
+        self.assertIn("review-pitfall-checker-v2/outputs/fitornot-storage-state.env", gitignore_text)
 
     def test_repo_gitignore_keeps_required_backend_python_modules_uploadable(self) -> None:
         required_paths = [

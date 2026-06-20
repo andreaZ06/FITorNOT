@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import io
 import base64
@@ -85,3 +86,57 @@ class StorageStateExportCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Paste this into Railway", output)
         self.assertIn(summary["env_assignment"], output)
+
+    def test_export_storage_state_prefers_live_cdp_browser_when_marker_exists(self):
+        export_module = importlib.import_module("export_fitornot_storage_state")
+        payload = {
+            "cookies": [{"name": "sid", "value": "x", "domain": ".jd.com", "path": "/"}],
+            "origins": [],
+        }
+
+        class FakeContext:
+            async def storage_state(self):
+                return payload
+
+        class FakeBrowser:
+            def __init__(self):
+                self.contexts = [FakeContext()]
+
+        class FakeChromium:
+            def __init__(self):
+                self.connected = []
+
+            async def connect_over_cdp(self, url):
+                self.connected.append(url)
+                return FakeBrowser()
+
+            async def launch_persistent_context(self, *args, **kwargs):
+                raise AssertionError("persistent fallback should not be used when CDP is available")
+
+        class FakePlaywrightContextManager:
+            def __init__(self, chromium):
+                self.chromium = chromium
+
+            async def __aenter__(self):
+                class FakePlaywright:
+                    pass
+
+                fake_playwright = FakePlaywright()
+                fake_playwright.chromium = self.chromium
+                return fake_playwright
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        chromium = FakeChromium()
+
+        with tempfile.TemporaryDirectory() as profile_dir, tempfile.TemporaryDirectory() as output_dir:
+            marker_path = Path(profile_dir) / "cdp-url.txt"
+            marker_path.write_text("http://127.0.0.1:9222", encoding="utf-8")
+            output_path = Path(output_dir) / "storage-state.json"
+
+            with patch.object(export_module, "get_async_playwright", return_value=lambda: FakePlaywrightContextManager(chromium)):
+                summary = asyncio.run(export_module.export_storage_state(Path(profile_dir), output_path))
+
+        self.assertEqual(chromium.connected, ["http://127.0.0.1:9222"])
+        self.assertEqual(summary["output_path"], str(output_path))

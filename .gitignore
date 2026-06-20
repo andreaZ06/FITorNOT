@@ -77,3 +77,5 @@ src/config/db/migrations*
 review-pitfall-checker-v2/.browser-profile*
 review-pitfall-checker-v2/chrome*.log
 review-pitfall-checker-v2/tmp_*
+review-pitfall-checker-v2/outputs/fitornot-storage-state.json
+review-pitfall-checker-v2/outputs/fitornot-storage-state.env
