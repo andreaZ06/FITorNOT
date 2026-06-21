@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
-DEFAULT_BROWSER_CHANNEL = "chrome"
+DEFAULT_BROWSER_CHANNEL = ""
 DEFAULT_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -68,7 +68,8 @@ def _default_profile_source_root() -> Path | None:
 
 def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[str, Any]:
     cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip() or (_read_cdp_url_marker(profile_dir) or "")
-    channel = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip() or DEFAULT_BROWSER_CHANNEL
+    channel_raw = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip()
+    channel = channel_raw or None
     user_agent = os.getenv("FITORNOT_BROWSER_USER_AGENT", DEFAULT_BROWSER_USER_AGENT).strip() or DEFAULT_BROWSER_USER_AGENT
     source_root = os.getenv("FITORNOT_BROWSER_PROFILE_SOURCE_DIR", "").strip()
     if source_root:
@@ -618,19 +619,24 @@ class PlaywrightDomesticBrowserAdapter:
             self.profile_dir.mkdir(parents=True, exist_ok=True)
             if session_config.get("sync_system_profile") and session_config.get("profile_source_root"):
                 sync_browser_profile(session_config["profile_source_root"], self.profile_dir)
-            context = await playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_dir),
-                headless=self.headless,
-                channel=session_config["channel"],
-                locale="zh-CN",
-                viewport={"width": 1440, "height": 1080},
-                user_agent=session_config["user_agent"],
-                extra_http_headers=session_config["extra_http_headers"],
-                args=[
+            launch_options: dict[str, Any] = {
+                "user_data_dir": str(self.profile_dir),
+                "headless": self.headless,
+                "locale": "zh-CN",
+                "viewport": {"width": 1440, "height": 1080},
+                "user_agent": session_config["user_agent"],
+                "extra_http_headers": session_config["extra_http_headers"],
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--start-maximized",
                     "--lang=zh-CN",
                 ],
+            }
+            if session_config["channel"]:
+                launch_options["channel"] = session_config["channel"]
+
+            context = await playwright.chromium.launch_persistent_context(
+                **launch_options,
             )
             try:
                 yield context
