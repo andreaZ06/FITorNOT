@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -375,6 +376,47 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
                 "copied-with-esentutl",
             )
             self.assertFalse(summary["errors"])
+
+    def test_build_persistent_launch_options_include_container_safe_flags(self):
+        module = importlib.import_module("domestic_browser")
+
+        options = module.build_persistent_launch_options(
+            profile_dir=Path("C:/fitornot/profile"),
+            headless=True,
+            session_config={
+                "user_agent": "fitornot-agent",
+                "extra_http_headers": {"Accept-Language": "zh-CN"},
+                "channel": None,
+            },
+        )
+
+        self.assertIn("--no-sandbox", options["args"])
+        self.assertIn("--disable-dev-shm-usage", options["args"])
+        self.assertIn("--disable-gpu", options["args"])
+
+
+class DomesticBrowserAdapterAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_lazy_scroll_prefers_dom_scroll_without_mouse_wheel(self):
+        module = importlib.import_module("domestic_browser")
+        adapter = module.PlaywrightDomesticBrowserAdapter(headless=True)
+        evaluate_calls: list[str] = []
+        wheel_calls: list[tuple[int, int]] = []
+
+        async def fake_evaluate(script):
+            evaluate_calls.append(script)
+
+        async def fake_wheel(delta_x, delta_y):
+            wheel_calls.append((delta_x, delta_y))
+
+        page = SimpleNamespace(
+            evaluate=fake_evaluate,
+            mouse=SimpleNamespace(wheel=fake_wheel),
+        )
+
+        await adapter._lazy_scroll(page, rounds=2)
+
+        self.assertEqual(len(evaluate_calls), 2)
+        self.assertEqual(wheel_calls, [])
 
 
 if __name__ == "__main__":

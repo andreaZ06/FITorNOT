@@ -90,6 +90,33 @@ def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[
     }
 
 
+def build_persistent_launch_options(
+    profile_dir: Path | str,
+    headless: bool,
+    session_config: dict[str, Any],
+) -> dict[str, Any]:
+    launch_options: dict[str, Any] = {
+        "user_data_dir": str(profile_dir),
+        "headless": headless,
+        "locale": "zh-CN",
+        "viewport": {"width": 1440, "height": 1080},
+        "user_agent": session_config["user_agent"],
+        "extra_http_headers": session_config["extra_http_headers"],
+        "args": [
+            "--disable-blink-features=AutomationControlled",
+            "--start-maximized",
+            "--lang=zh-CN",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+        ],
+    }
+    if session_config.get("channel"):
+        launch_options["channel"] = session_config["channel"]
+    return launch_options
+
+
 def sync_browser_profile(source_root: Path | str | None, target_root: Path | str) -> dict[str, Any]:
     if not source_root:
         return {"copied": False, "copied_entries": 0, "errors": []}
@@ -619,24 +646,12 @@ class PlaywrightDomesticBrowserAdapter:
             self.profile_dir.mkdir(parents=True, exist_ok=True)
             if session_config.get("sync_system_profile") and session_config.get("profile_source_root"):
                 sync_browser_profile(session_config["profile_source_root"], self.profile_dir)
-            launch_options: dict[str, Any] = {
-                "user_data_dir": str(self.profile_dir),
-                "headless": self.headless,
-                "locale": "zh-CN",
-                "viewport": {"width": 1440, "height": 1080},
-                "user_agent": session_config["user_agent"],
-                "extra_http_headers": session_config["extra_http_headers"],
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--start-maximized",
-                    "--lang=zh-CN",
-                ],
-            }
-            if session_config["channel"]:
-                launch_options["channel"] = session_config["channel"]
-
             context = await playwright.chromium.launch_persistent_context(
-                **launch_options,
+                **build_persistent_launch_options(
+                    profile_dir=self.profile_dir,
+                    headless=self.headless,
+                    session_config=session_config,
+                ),
             )
             try:
                 yield context
@@ -665,7 +680,10 @@ class PlaywrightDomesticBrowserAdapter:
     async def _lazy_scroll(self, page: Any, rounds: int | None = None) -> None:
         total_rounds = self.scroll_rounds if rounds is None else rounds
         for _ in range(max(total_rounds, 0)):
-            await page.mouse.wheel(0, 1600)
+            try:
+                await page.evaluate("window.scrollBy(0, 1600)")
+            except Exception:
+                await page.mouse.wheel(0, 1600)
             await asyncio.sleep(0.8)
 
     async def _capture_relevant_response_text(
