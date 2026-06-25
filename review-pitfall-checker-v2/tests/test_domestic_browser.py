@@ -644,14 +644,14 @@ class DomesticBrowserAdapterAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_apply_seed_storage_state_adds_cookies_and_init_script(self):
         module = importlib.import_module("domestic_browser")
         recorded_cookies: list[list[dict[str, object]]] = []
-        recorded_scripts: list[tuple[str, dict[str, object]]] = []
+        recorded_scripts: list[str] = []
 
         class FakeContext:
             async def add_cookies(self, cookies):
                 recorded_cookies.append(cookies)
 
-            async def add_init_script(self, script, payload):
-                recorded_scripts.append((script, payload))
+            async def add_init_script(self, script):
+                recorded_scripts.append(script)
 
         await module.apply_session_seed_storage_state(
             FakeContext(),
@@ -676,11 +676,9 @@ class DomesticBrowserAdapterAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(recorded_cookies[0][0]["domain"], ".taobao.com")
-        self.assertIn("localStorage", recorded_scripts[0][0])
-        self.assertEqual(
-            recorded_scripts[0][1]["https://www.xiaohongshu.com"]["localStorage"][0]["name"],
-            "web_session",
-        )
+        self.assertIn("localStorage", recorded_scripts[0])
+        self.assertIn("https://www.xiaohongshu.com", recorded_scripts[0])
+        self.assertIn("web_session", recorded_scripts[0])
 
 
 if __name__ == "__main__":

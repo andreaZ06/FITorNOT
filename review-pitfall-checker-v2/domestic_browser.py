@@ -466,22 +466,23 @@ async def apply_session_seed_storage_state(context: Any, session_config: dict[st
         }
 
     if origin_payload:
+        origin_payload_json = json.dumps(origin_payload, ensure_ascii=False, separators=(",", ":"))
         await context.add_init_script(
-            """(originState) => {
-                try {
+            f"""(() => {{
+                try {{
+                    const originState = {origin_payload_json};
                     const seed = originState?.[window.location.origin];
                     if (!seed) return;
-                    for (const item of seed.localStorage || []) {
+                    for (const item of seed.localStorage || []) {{
                         window.localStorage.setItem(item.name, item.value);
-                    }
-                    for (const item of seed.sessionStorage || []) {
+                    }}
+                    for (const item of seed.sessionStorage || []) {{
                         window.sessionStorage.setItem(item.name, item.value);
-                    }
-                } catch (error) {
+                    }}
+                }} catch (error) {{
                     console.debug('FITorNOT storage seed skipped', error);
-                }
-            }""",
-            origin_payload,
+                }}
+            }})();"""
         )
 
 
