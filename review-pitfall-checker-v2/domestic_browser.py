@@ -42,6 +42,59 @@ SEED_STORAGE_ALLOWED_HOST_SUFFIXES = (
     "xiaohongshu.com",
     "xhs.cn",
 )
+SEED_STORAGE_ALLOWED_EXACT_KEYS_BY_HOST_SUFFIX: dict[str, set[str]] = {
+    "jd.com": {
+        "__we_m_token__",
+        "aria",
+        "shshshfpa",
+        "shshshfpb",
+        "shshshfpx",
+        "3AB9D23F7A4B3C9B",
+        "3AB9D23F7A4B3CSS",
+    },
+    "3.cn": {
+        "__we_m_token__",
+        "aria",
+        "shshshfpa",
+        "shshshfpb",
+        "shshshfpx",
+        "3AB9D23F7A4B3C9B",
+        "3AB9D23F7A4B3CSS",
+    },
+    "taobao.com": {
+        "_3dtid",
+        "aria",
+        "baxia_entry_config",
+        "isg__",
+        "lswucn",
+        "lswusea",
+        "tfstk__",
+    },
+    "tmall.com": {
+        "_3dtid",
+        "aria",
+        "baxia_entry_config",
+        "isg__",
+        "lswucn",
+        "lswusea",
+        "tfstk__",
+    },
+    "xiaohongshu.com": {
+        "b1",
+        "RWP_LOGIN_TOKEN",
+        "web_session",
+    },
+    "xhs.cn": {
+        "b1",
+        "RWP_LOGIN_TOKEN",
+        "web_session",
+    },
+}
+SEED_STORAGE_ALLOWED_PREFIXES_BY_HOST_SUFFIX: dict[str, tuple[str, ...]] = {
+    "jd.com": ("__we_m_", "WQ_"),
+    "3.cn": ("__we_m_", "WQ_"),
+}
+SEED_STORAGE_MAX_VALUE_CHARS = 8192
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -251,6 +304,35 @@ def _host_matches_seed_storage_allowlist(hostname: str) -> bool:
     )
 
 
+def _matching_seed_storage_host_suffix(hostname: str) -> str | None:
+    normalized_host = hostname.strip().lower().lstrip(".")
+    if not normalized_host:
+        return None
+    for suffix in SEED_STORAGE_ALLOWED_HOST_SUFFIXES:
+        if normalized_host == suffix or normalized_host.endswith(f".{suffix}"):
+            return suffix
+    return None
+
+
+def _should_keep_seed_storage_entry(hostname: str, entry: dict[str, str]) -> bool:
+    host_suffix = _matching_seed_storage_host_suffix(hostname)
+    if not host_suffix:
+        return False
+
+    entry_name = str(entry.get("name", "")).strip()
+    entry_value = str(entry.get("value", ""))
+    if not entry_name or len(entry_value) > SEED_STORAGE_MAX_VALUE_CHARS:
+        return False
+
+    if entry_name in SEED_STORAGE_ALLOWED_EXACT_KEYS_BY_HOST_SUFFIX.get(host_suffix, set()):
+        return True
+
+    return any(
+        entry_name.startswith(prefix)
+        for prefix in SEED_STORAGE_ALLOWED_PREFIXES_BY_HOST_SUFFIX.get(host_suffix, ())
+    )
+
+
 def compact_seed_storage_state(payload: dict[str, Any]) -> dict[str, Any]:
     compacted_cookies: list[dict[str, Any]] = []
     seen_cookie_keys: set[str] = set()
@@ -287,12 +369,32 @@ def compact_seed_storage_state(payload: dict[str, Any]) -> dict[str, Any]:
         if not normalized_origin:
             continue
         origin_url = str(normalized_origin["origin"]).strip()
-        if not _host_matches_seed_storage_allowlist(urlparse(origin_url).hostname or ""):
+        origin_hostname = urlparse(origin_url).hostname or ""
+        if not _host_matches_seed_storage_allowlist(origin_hostname):
             continue
         if origin_url in seen_origins:
             continue
+
+        filtered_local_storage = [
+            entry
+            for entry in normalized_origin.get("localStorage", [])
+            if _should_keep_seed_storage_entry(origin_hostname, entry)
+        ]
+        filtered_session_storage = [
+            entry
+            for entry in normalized_origin.get("sessionStorage", [])
+            if _should_keep_seed_storage_entry(origin_hostname, entry)
+        ]
+        if not filtered_local_storage and not filtered_session_storage:
+            continue
+
         seen_origins.add(origin_url)
-        compacted_origins.append(normalized_origin)
+        compacted_origin: dict[str, Any] = {"origin": origin_url}
+        if filtered_local_storage:
+            compacted_origin["localStorage"] = filtered_local_storage
+        if filtered_session_storage:
+            compacted_origin["sessionStorage"] = filtered_session_storage
+        compacted_origins.append(compacted_origin)
 
     return {
         "cookies": compacted_cookies,

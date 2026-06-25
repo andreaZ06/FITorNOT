@@ -252,6 +252,61 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
         self.assertEqual(len(compacted["origins"]), 1)
         self.assertEqual(compacted["origins"][0]["origin"], "https://www.xiaohongshu.com")
 
+    def test_compact_seed_storage_state_keeps_known_auth_keys_and_drops_cache_blobs(self):
+        module = importlib.import_module("domestic_browser")
+
+        compacted = module.compact_seed_storage_state(
+            {
+                "cookies": [],
+                "origins": [
+                    {
+                        "origin": "https://www.xiaohongshu.com",
+                        "localStorage": [
+                            {"name": "redmoji", "value": "x" * 4000},
+                            {"name": "b1", "value": "trusted-device"},
+                            {"name": "RWP_LOGIN_TOKEN", "value": "trusted-login"},
+                            {"name": "xhs-pc-search-history-5a07289111be101a125a20cb", "value": "history"},
+                        ],
+                    },
+                    {
+                        "origin": "https://www.jd.com",
+                        "localStorage": [
+                            {"name": "PC_HOME_MAIL_Resp", "value": "mail-cache"},
+                            {"name": "__we_m_token__", "value": "trusted-jd-token"},
+                            {"name": "__we_m_cf__", "value": "trusted-jd-fingerprint"},
+                        ],
+                    },
+                    {
+                        "origin": "https://www.taobao.com",
+                        "localStorage": [
+                            {"name": "PC_INDEX_dataCache_33667440", "value": "huge-cache"},
+                            {"name": "APLUS_CORE_1.0.20_20260108171550_39484283", "value": "analytics"},
+                            {"name": "tfstk__", "value": "trusted-taobao-token"},
+                            {"name": "baxia_entry_config", "value": "trusted-baxia-config"},
+                        ],
+                    },
+                ],
+            }
+        )
+
+        compacted_by_origin = {
+            origin["origin"]: {item["name"] for item in origin.get("localStorage", [])}
+            for origin in compacted["origins"]
+        }
+
+        self.assertEqual(
+            compacted_by_origin["https://www.xiaohongshu.com"],
+            {"b1", "RWP_LOGIN_TOKEN"},
+        )
+        self.assertEqual(
+            compacted_by_origin["https://www.jd.com"],
+            {"__we_m_token__", "__we_m_cf__"},
+        )
+        self.assertEqual(
+            compacted_by_origin["https://www.taobao.com"],
+            {"tfstk__", "baxia_entry_config"},
+        )
+
     def test_encode_seed_storage_state_payload_round_trips_through_loader(self):
         module = importlib.import_module("domestic_browser")
         storage_state_payload = {
