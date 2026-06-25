@@ -111,6 +111,8 @@ def build_chromium_command(config: BrowserServiceConfig, executable_path: str) -
         "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--disable-blink-features=AutomationControlled",

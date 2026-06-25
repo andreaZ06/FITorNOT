@@ -83,6 +83,8 @@ class BrowserServiceTest(unittest.TestCase):
         self.assertIn("--remote-debugging-address=0.0.0.0", command)
         self.assertIn("--remote-debugging-port=9222", command)
         self.assertIn(f"--user-data-dir={config.profile_dir}", command)
+        self.assertIn("--no-sandbox", command)
+        self.assertIn("--disable-setuid-sandbox", command)
         self.assertIn("https://www.jd.com/", command)
 
     def test_service_launcher_uses_browser_mode_command(self):
