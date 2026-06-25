@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -66,6 +67,82 @@ def _default_profile_source_root() -> Path | None:
     return None
 
 
+def _default_seed_cookie_path(profile_dir: Path | str | None) -> Path | None:
+    if not profile_dir:
+        return None
+    return Path(profile_dir) / "seed-cookies.json"
+
+
+def _decode_seed_cookie_payload(raw_value: str) -> str:
+    normalized = raw_value.strip()
+    if not normalized:
+        return ""
+    if normalized.startswith("base64:"):
+        payload = normalized.split(":", 1)[1].strip()
+        if not payload:
+            return ""
+        return base64.b64decode(payload).decode("utf-8")
+    return normalized
+
+
+def _normalize_seed_cookie(cookie: Any) -> dict[str, Any] | None:
+    if not isinstance(cookie, dict):
+        return None
+
+    name = str(cookie.get("name", "")).strip()
+    value = cookie.get("value")
+    if not name or value is None:
+        return None
+
+    normalized: dict[str, Any] = {
+        "name": name,
+        "value": str(value),
+    }
+    for key in ("url", "domain", "path", "expires", "httpOnly", "secure", "sameSite"):
+        if key in cookie and cookie[key] not in (None, ""):
+            normalized[key] = cookie[key]
+
+    if not normalized.get("url") and not normalized.get("domain"):
+        return None
+    if normalized.get("domain") and not normalized.get("path"):
+        normalized["path"] = "/"
+    return normalized
+
+
+def load_browser_seed_cookies(profile_dir: Path | str | None = None) -> list[dict[str, Any]]:
+    cookie_file = os.getenv("FITORNOT_BROWSER_COOKIES_FILE", "").strip()
+    raw_payload = os.getenv("FITORNOT_BROWSER_COOKIES_JSON", "").strip()
+    seed_cookie_path = Path(cookie_file) if cookie_file else _default_seed_cookie_path(profile_dir)
+
+    payload_text = ""
+    if seed_cookie_path and seed_cookie_path.exists():
+        payload_text = seed_cookie_path.read_text(encoding="utf-8").replace("\ufeff", "").strip()
+    elif raw_payload:
+        payload_text = _decode_seed_cookie_payload(raw_payload)
+
+    if not payload_text:
+        return []
+
+    try:
+        payload = json.loads(payload_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+    if isinstance(payload, dict):
+        raw_cookies = payload.get("cookies", [])
+    elif isinstance(payload, list):
+        raw_cookies = payload
+    else:
+        raw_cookies = []
+
+    normalized_cookies: list[dict[str, Any]] = []
+    for item in raw_cookies:
+        normalized_cookie = _normalize_seed_cookie(item)
+        if normalized_cookie:
+            normalized_cookies.append(normalized_cookie)
+    return normalized_cookies
+
+
 def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[str, Any]:
     cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip() or (_read_cdp_url_marker(profile_dir) or "")
     channel_raw = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip()
@@ -87,6 +164,7 @@ def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[
             "FITORNOT_BROWSER_SYNC_SYSTEM_PROFILE",
             bool(profile_source_root),
         ),
+        "seed_cookies": load_browser_seed_cookies(profile_dir),
     }
 
 
@@ -192,6 +270,12 @@ def _copy_file_with_esentutl(source_item: Path, destination_item: Path) -> bool:
         return destination_item.exists() and destination_item.stat().st_size > 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+async def apply_session_seed_cookies(context: Any, session_config: dict[str, Any]) -> None:
+    cookies = session_config.get("seed_cookies") or []
+    if cookies:
+        await context.add_cookies(cookies)
 
 
 def _strip_jsonp_wrapper(text: str) -> str:
@@ -638,6 +722,7 @@ class PlaywrightDomesticBrowserAdapter:
                         user_agent=session_config["user_agent"],
                         extra_http_headers=session_config["extra_http_headers"],
                     )
+                    await apply_session_seed_cookies(context, session_config)
                     yield context
                 finally:
                     await browser.close()
@@ -654,6 +739,7 @@ class PlaywrightDomesticBrowserAdapter:
                 ),
             )
             try:
+                await apply_session_seed_cookies(context, session_config)
                 yield context
             finally:
                 await context.close()

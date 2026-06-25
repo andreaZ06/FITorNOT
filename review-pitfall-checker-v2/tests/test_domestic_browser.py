@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sqlite3
 import tempfile
@@ -81,6 +82,67 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
 
         self.assertEqual(config["mode"], "persistent")
         self.assertIsNone(config["channel"])
+
+    def test_build_browser_session_config_reads_seed_cookies_from_json_env(self):
+        module = importlib.import_module("domestic_browser")
+        cookie_payload = json.dumps(
+            [
+                {
+                    "name": "pt_key",
+                    "value": "jd-session",
+                    "domain": ".jd.com",
+                    "path": "/",
+                }
+            ]
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "FITORNOT_BROWSER_COOKIES_JSON": cookie_payload,
+                "FITORNOT_BROWSER_CDP_URL": "",
+            },
+            clear=False,
+        ):
+            config = module.build_browser_session_config()
+
+        self.assertEqual(len(config["seed_cookies"]), 1)
+        self.assertEqual(config["seed_cookies"][0]["name"], "pt_key")
+
+    def test_build_browser_session_config_reads_seed_cookies_from_default_profile_file(self):
+        module = importlib.import_module("domestic_browser")
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            seed_file = Path(profile_dir) / "seed-cookies.json"
+            seed_file.write_text(
+                json.dumps(
+                    {
+                        "cookies": [
+                            {
+                                "name": "web_session",
+                                "value": "xhs-session",
+                                "domain": ".xiaohongshu.com",
+                                "path": "/",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FITORNOT_BROWSER_COOKIES_JSON": "",
+                    "FITORNOT_BROWSER_COOKIES_FILE": "",
+                    "FITORNOT_BROWSER_CDP_URL": "",
+                },
+                clear=False,
+            ):
+                config = module.build_browser_session_config(profile_dir)
+
+        self.assertEqual(len(config["seed_cookies"]), 1)
+        self.assertEqual(config["seed_cookies"][0]["domain"], ".xiaohongshu.com")
 
     def test_detect_platform_block_reason_identifies_jd_login_wall(self):
         module = importlib.import_module("domestic_browser")
@@ -417,6 +479,31 @@ class DomesticBrowserAdapterAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(evaluate_calls), 2)
         self.assertEqual(wheel_calls, [])
+
+    async def test_apply_seed_cookies_adds_cookies_to_context(self):
+        module = importlib.import_module("domestic_browser")
+        recorded: list[list[dict[str, object]]] = []
+
+        class FakeContext:
+            async def add_cookies(self, cookies):
+                recorded.append(cookies)
+
+        await module.apply_session_seed_cookies(
+            FakeContext(),
+            {
+                "seed_cookies": [
+                    {
+                        "name": "sid",
+                        "value": "cookie",
+                        "domain": ".taobao.com",
+                        "path": "/",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0][0]["name"], "sid")
 
 
 if __name__ == "__main__":

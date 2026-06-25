@@ -1055,7 +1055,8 @@ def _trusted_session_bootstrap_hint() -> str:
     launcher_script = Path(__file__).resolve().parent / "start_fitornot_browser.ps1"
     return (
         f"Run {launcher_script} -ProfileDir \"{profile_dir}\" to open the FITorNOT browser profile and log in once, "
-        "or connect a trusted Chrome session via FITORNOT_BROWSER_CDP_URL."
+        "or connect a trusted Chrome session via FITORNOT_BROWSER_CDP_URL, or provide exported cookies with "
+        "FITORNOT_BROWSER_COOKIES_FILE / FITORNOT_BROWSER_COOKIES_JSON."
     )
 
 

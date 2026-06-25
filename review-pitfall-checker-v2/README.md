@@ -53,6 +53,7 @@ FITORNOT_BROWSER_HEADLESS=false
 FITORNOT_BROWSER_TIMEOUT_MS=45000
 FITORNOT_BROWSER_SCROLL_ROUNDS=2
 FITORNOT_ENABLE_BROWSER_AUTOMATION=1
+FITORNOT_BROWSER_COOKIES_FILE=./.browser-profile/seed-cookies.json
 ```
 
 Notes:
@@ -61,6 +62,11 @@ Notes:
   manual login for Taobao or Xiaohongshu if needed.
 - Login state is stored in the persistent profile directory and will be reused
   across runs.
+- If you need to bootstrap a trusted session inside Railway, you can provide an
+  exported Playwright-style cookies file via `FITORNOT_BROWSER_COOKIES_FILE`,
+  or set `FITORNOT_BROWSER_COOKIES_JSON` to a raw JSON array or `base64:...`
+  encoded JSON payload. The backend also auto-detects `seed-cookies.json`
+  inside the profile directory.
 - If browser automation is unavailable or blocked, the workflow degrades to the
   existing Bright Data fallback without inventing comments.
 
@@ -141,6 +147,14 @@ Notes:
   validated a browser-capable runtime.
 - Without browser automation, the API should degrade through its existing
   fallback paths instead of inventing evidence.
+- Once Railway can run Playwright stably, prefer one of these trusted-session
+  bootstrap paths:
+  - `FITORNOT_BROWSER_CDP_URL=https://...` for a long-lived remote Chrome/CDP
+    session
+  - `FITORNOT_BROWSER_COOKIES_FILE=/app/.browser-profile/seed-cookies.json`
+    for an uploaded cookies file on the service filesystem
+  - `FITORNOT_BROWSER_COOKIES_JSON=base64:...` only when the cookie payload is
+    small enough to fit your platform's environment-variable limits
 
 ### 3. Deploy and verify health
 
