@@ -34,6 +34,7 @@ class BrowserServiceTest(unittest.TestCase):
 
         self.assertEqual(config.public_port, 38080)
         self.assertEqual(config.cdp_port, 9222)
+        self.assertEqual(config.chromium_cdp_port, 9223)
         self.assertEqual(config.vnc_port, 5900)
         self.assertEqual(config.display, ":99")
         self.assertTrue(str(config.profile_dir).endswith(".browser-profile"))
@@ -43,6 +44,7 @@ class BrowserServiceTest(unittest.TestCase):
         os.environ["PORT"] = "38080"
         os.environ["FITORNOT_BROWSER_PUBLIC_PORT"] = "39090"
         os.environ["FITORNOT_BROWSER_CDP_PORT"] = "9333"
+        os.environ["FITORNOT_BROWSER_CHROMIUM_CDP_PORT"] = "9444"
         os.environ["FITORNOT_BROWSER_VNC_PORT"] = "5999"
         os.environ["FITORNOT_BROWSER_DISPLAY"] = ":88"
         os.environ["FITORNOT_BROWSER_START_URL"] = "https://www.taobao.com/"
@@ -53,6 +55,7 @@ class BrowserServiceTest(unittest.TestCase):
 
         self.assertEqual(config.public_port, 39090)
         self.assertEqual(config.cdp_port, 9333)
+        self.assertEqual(config.chromium_cdp_port, 9444)
         self.assertEqual(config.vnc_port, 5999)
         self.assertEqual(config.display, ":88")
         self.assertEqual(config.start_url, "https://www.taobao.com/")
@@ -80,12 +83,23 @@ class BrowserServiceTest(unittest.TestCase):
         command = module.build_chromium_command(config, executable_path="/ms-playwright/chromium/chrome")
 
         self.assertEqual(command[0], "/ms-playwright/chromium/chrome")
-        self.assertIn("--remote-debugging-address=0.0.0.0", command)
-        self.assertIn("--remote-debugging-port=9222", command)
+        self.assertIn("--remote-debugging-address=127.0.0.1", command)
+        self.assertIn("--remote-debugging-port=9223", command)
         self.assertIn(f"--user-data-dir={config.profile_dir}", command)
         self.assertIn("--no-sandbox", command)
         self.assertIn("--disable-setuid-sandbox", command)
         self.assertIn("https://www.jd.com/", command)
+
+    def test_build_socat_command_bridges_public_cdp_port_to_local_chromium_port(self):
+        os.environ["PORT"] = "38080"
+        module = importlib.import_module("browser_service")
+        config = module.build_browser_service_config()
+
+        command = module.build_socat_command(config)
+
+        self.assertEqual(command[0], "socat")
+        self.assertIn("TCP-LISTEN:9222,fork,reuseaddr,bind=0.0.0.0", command)
+        self.assertIn("TCP:127.0.0.1:9223", command)
 
     def test_service_launcher_uses_browser_mode_command(self):
         os.environ["FITORNOT_SERVICE_MODE"] = "browser"

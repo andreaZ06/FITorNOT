@@ -33,6 +33,7 @@ class DeploymentArtifactsTest(unittest.TestCase):
         railway_payload = json.loads(railway_config.read_text(encoding="utf-8"))
 
         self.assertIn("service_launcher.py", dockerfile_text)
+        self.assertIn("socat", dockerfile_text)
         self.assertIn("xvfb", dockerfile_text)
         self.assertIn("websockify", dockerfile_text)
         self.assertIn(".browser-profile/", dockerignore_text)
@@ -41,6 +42,7 @@ class DeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("NEON_DATABASE_URL", env_example_text)
         self.assertIn("FITORNOT_SERVICE_MODE", env_example_text)
         self.assertIn("FITORNOT_BROWSER_CDP_URL", env_example_text)
+        self.assertIn("FITORNOT_BROWSER_CHROMIUM_CDP_PORT", env_example_text)
         self.assertEqual("/health", railway_payload["deploy"]["healthcheckPath"])
 
 

@@ -23,6 +23,7 @@ DEFAULT_BROWSER_SERVICE_DISPLAY = ":99"
 DEFAULT_BROWSER_SERVICE_SCREEN_SIZE = "1440x1080x24"
 DEFAULT_BROWSER_SERVICE_PUBLIC_PORT = 8080
 DEFAULT_BROWSER_SERVICE_CDP_PORT = 9222
+DEFAULT_BROWSER_SERVICE_CHROMIUM_CDP_PORT = 9223
 DEFAULT_BROWSER_SERVICE_VNC_PORT = 5900
 DEFAULT_BROWSER_SERVICE_NOVNC_ROOT = "/usr/share/novnc"
 DEFAULT_BROWSER_SERVICE_WEB_ROOT = "/tmp/fitornot-browser-web"
@@ -33,6 +34,7 @@ DEFAULT_BROWSER_SERVICE_PROFILE_DIR = Path(__file__).resolve().parent / ".browse
 class BrowserServiceConfig:
     public_port: int
     cdp_port: int
+    chromium_cdp_port: int
     vnc_port: int
     display: str
     screen_size: str
@@ -67,6 +69,9 @@ def build_browser_service_config() -> BrowserServiceConfig:
     return BrowserServiceConfig(
         public_port=public_port,
         cdp_port=_env_int("FITORNOT_BROWSER_CDP_PORT", DEFAULT_BROWSER_SERVICE_CDP_PORT),
+        chromium_cdp_port=_env_int(
+            "FITORNOT_BROWSER_CHROMIUM_CDP_PORT", DEFAULT_BROWSER_SERVICE_CHROMIUM_CDP_PORT
+        ),
         vnc_port=_env_int("FITORNOT_BROWSER_VNC_PORT", DEFAULT_BROWSER_SERVICE_VNC_PORT),
         display=os.getenv("FITORNOT_BROWSER_DISPLAY", "").strip() or DEFAULT_BROWSER_SERVICE_DISPLAY,
         screen_size=os.getenv("FITORNOT_BROWSER_SCREEN_SIZE", "").strip() or DEFAULT_BROWSER_SERVICE_SCREEN_SIZE,
@@ -106,8 +111,8 @@ def build_chromium_command(config: BrowserServiceConfig, executable_path: str) -
     return [
         executable_path,
         f"--user-data-dir={config.profile_dir}",
-        f"--remote-debugging-port={config.cdp_port}",
-        "--remote-debugging-address=0.0.0.0",
+        f"--remote-debugging-port={config.chromium_cdp_port}",
+        "--remote-debugging-address=127.0.0.1",
         "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
@@ -121,6 +126,14 @@ def build_chromium_command(config: BrowserServiceConfig, executable_path: str) -
         "--window-position=0,0",
         "--window-size=1440,1080",
         config.start_url,
+    ]
+
+
+def build_socat_command(config: BrowserServiceConfig) -> list[str]:
+    return [
+        "socat",
+        f"TCP-LISTEN:{config.cdp_port},fork,reuseaddr,bind=0.0.0.0",
+        f"TCP:127.0.0.1:{config.chromium_cdp_port}",
     ]
 
 
@@ -211,6 +224,10 @@ def run_browser_service(config: BrowserServiceConfig) -> int:
 
         chromium_process = _launch_process(build_chromium_command(config, chromium_executable), env=display_env)
         processes.append(chromium_process)
+        _wait_for_tcp("127.0.0.1", config.chromium_cdp_port, timeout_seconds=30)
+
+        socat_process = _launch_process(build_socat_command(config))
+        processes.append(socat_process)
         _wait_for_tcp("127.0.0.1", config.cdp_port, timeout_seconds=30)
 
         x11vnc_process = _launch_process(build_x11vnc_command(config), env=display_env)
@@ -224,6 +241,9 @@ def run_browser_service(config: BrowserServiceConfig) -> int:
             chromium_exit_code = chromium_process.poll()
             if chromium_exit_code is not None:
                 return chromium_exit_code
+            socat_exit_code = socat_process.poll()
+            if socat_exit_code is not None:
+                return socat_exit_code
             websockify_exit_code = websockify_process.poll()
             if websockify_exit_code is not None:
                 return websockify_exit_code
@@ -242,6 +262,7 @@ def main() -> None:
                 "service": "fitornot-browser",
                 "public_port": config.public_port,
                 "cdp_port": config.cdp_port,
+                "chromium_cdp_port": config.chromium_cdp_port,
                 "vnc_port": config.vnc_port,
                 "profile_dir": str(config.profile_dir),
                 "start_url": config.start_url,

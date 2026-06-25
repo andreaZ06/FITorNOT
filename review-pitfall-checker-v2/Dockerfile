@@ -11,6 +11,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         fluxbox \
         novnc \
+        socat \
         websockify \
         x11vnc \
         xauth \

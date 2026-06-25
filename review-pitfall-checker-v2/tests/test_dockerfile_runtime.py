@@ -18,6 +18,7 @@ class DockerfileRuntimeTest(unittest.TestCase):
         self.assertIn("fluxbox", dockerfile_text)
         self.assertIn("novnc", dockerfile_text)
         self.assertIn("websockify", dockerfile_text)
+        self.assertIn("socat", dockerfile_text)
 
     def test_dockerfile_uses_service_launcher_entrypoint(self):
         dockerfile_path = Path(__file__).resolve().parents[1] / "Dockerfile"
