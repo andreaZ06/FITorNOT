@@ -54,6 +54,7 @@ FITORNOT_BROWSER_TIMEOUT_MS=45000
 FITORNOT_BROWSER_SCROLL_ROUNDS=2
 FITORNOT_ENABLE_BROWSER_AUTOMATION=1
 FITORNOT_BROWSER_COOKIES_FILE=./.browser-profile/seed-cookies.json
+FITORNOT_BROWSER_STORAGE_STATE_FILE=./.browser-profile/seed-storage-state.json
 ```
 
 Notes:
@@ -67,6 +68,10 @@ Notes:
   or set `FITORNOT_BROWSER_COOKIES_JSON` to a raw JSON array or `base64:...`
   encoded JSON payload. The backend also auto-detects `seed-cookies.json`
   inside the profile directory.
+- For login-heavy sites, prefer exporting a compact Playwright storage state with
+  `python export_seed_storage_state.py`. That produces `seed-storage-state.json`
+  plus a compressed `FITORNOT_BROWSER_STORAGE_STATE=base64:...` line that keeps
+  only JD/Taobao/Xiaohongshu cookies and origin storage.
 - If browser automation is unavailable or blocked, the workflow degrades to the
   existing Bright Data fallback without inventing comments.
 
@@ -155,6 +160,10 @@ Notes:
     for an uploaded cookies file on the service filesystem
   - `FITORNOT_BROWSER_COOKIES_JSON=base64:...` only when the cookie payload is
     small enough to fit your platform's environment-variable limits
+  - `FITORNOT_BROWSER_STORAGE_STATE_FILE=/app/.browser-profile/seed-storage-state.json`
+    for a compact storage-state file exported from `export_seed_storage_state.py`
+  - `FITORNOT_BROWSER_STORAGE_STATE=base64:...` when the compressed payload fits
+    your platform's variable limits
 
 ### 3. Deploy and verify health
 

@@ -1056,7 +1056,8 @@ def _trusted_session_bootstrap_hint() -> str:
     return (
         f"Run {launcher_script} -ProfileDir \"{profile_dir}\" to open the FITorNOT browser profile and log in once, "
         "or connect a trusted Chrome session via FITORNOT_BROWSER_CDP_URL, or provide exported cookies with "
-        "FITORNOT_BROWSER_COOKIES_FILE / FITORNOT_BROWSER_COOKIES_JSON."
+        "FITORNOT_BROWSER_COOKIES_FILE / FITORNOT_BROWSER_COOKIES_JSON, or provide compact storage state with "
+        "FITORNOT_BROWSER_STORAGE_STATE_FILE / FITORNOT_BROWSER_STORAGE_STATE."
     )
 
 

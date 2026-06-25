@@ -1,9 +1,11 @@
 import importlib
+import gzip
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
+from base64 import b64encode
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -143,6 +145,140 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
 
         self.assertEqual(len(config["seed_cookies"]), 1)
         self.assertEqual(config["seed_cookies"][0]["domain"], ".xiaohongshu.com")
+
+    def test_build_browser_session_config_reads_seed_storage_state_from_env(self):
+        module = importlib.import_module("domestic_browser")
+        storage_state_payload = {
+            "cookies": [
+                {
+                    "name": "xhs.sid",
+                    "value": "trusted",
+                    "domain": ".xiaohongshu.com",
+                    "path": "/",
+                }
+            ],
+            "origins": [
+                {
+                    "origin": "https://www.xiaohongshu.com",
+                    "localStorage": [{"name": "web_session", "value": "trusted-session"}],
+                }
+            ],
+        }
+        encoded_payload = "base64:" + b64encode(
+            gzip.compress(json.dumps(storage_state_payload).encode("utf-8"))
+        ).decode("ascii")
+
+        with patch.dict(
+            os.environ,
+            {
+                "FITORNOT_BROWSER_STORAGE_STATE": encoded_payload,
+                "FITORNOT_BROWSER_STORAGE_STATE_FILE": "",
+                "FITORNOT_BROWSER_CDP_URL": "",
+            },
+            clear=False,
+        ):
+            config = module.build_browser_session_config()
+
+        self.assertEqual(config["seed_storage_state"]["cookies"][0]["name"], "xhs.sid")
+        self.assertEqual(
+            config["seed_storage_state"]["origins"][0]["localStorage"][0]["name"],
+            "web_session",
+        )
+
+    def test_build_browser_session_config_reads_seed_storage_state_from_default_profile_file(self):
+        module = importlib.import_module("domestic_browser")
+        storage_state_payload = {
+            "cookies": [
+                {
+                    "name": "pt_key",
+                    "value": "jd-trusted",
+                    "domain": ".jd.com",
+                    "path": "/",
+                }
+            ],
+            "origins": [],
+        }
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            storage_state_file = Path(profile_dir) / "seed-storage-state.json"
+            storage_state_file.write_text(json.dumps(storage_state_payload), encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FITORNOT_BROWSER_STORAGE_STATE": "",
+                    "FITORNOT_BROWSER_STORAGE_STATE_FILE": "",
+                    "FITORNOT_BROWSER_CDP_URL": "",
+                },
+                clear=False,
+            ):
+                config = module.build_browser_session_config(profile_dir)
+
+        self.assertEqual(config["seed_storage_state"]["cookies"][0]["name"], "pt_key")
+
+    def test_compact_seed_storage_state_filters_unrelated_domains(self):
+        module = importlib.import_module("domestic_browser")
+        compacted = module.compact_seed_storage_state(
+            {
+                "cookies": [
+                    {
+                        "name": "pt_key",
+                        "value": "jd-trusted",
+                        "domain": ".jd.com",
+                        "path": "/",
+                    },
+                    {
+                        "name": "gh",
+                        "value": "ignore-me",
+                        "domain": ".github.com",
+                        "path": "/",
+                    },
+                ],
+                "origins": [
+                    {
+                        "origin": "https://www.xiaohongshu.com",
+                        "localStorage": [{"name": "web_session", "value": "trusted"}],
+                    },
+                    {
+                        "origin": "https://example.com",
+                        "localStorage": [{"name": "noise", "value": "drop"}],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(len(compacted["cookies"]), 1)
+        self.assertEqual(compacted["cookies"][0]["domain"], ".jd.com")
+        self.assertEqual(len(compacted["origins"]), 1)
+        self.assertEqual(compacted["origins"][0]["origin"], "https://www.xiaohongshu.com")
+
+    def test_encode_seed_storage_state_payload_round_trips_through_loader(self):
+        module = importlib.import_module("domestic_browser")
+        storage_state_payload = {
+            "cookies": [
+                {
+                    "name": "mtop",
+                    "value": "taobao-trusted",
+                    "domain": ".taobao.com",
+                    "path": "/",
+                }
+            ],
+            "origins": [],
+        }
+        encoded_payload = module.encode_seed_storage_state_payload(storage_state_payload)
+
+        with patch.dict(
+            os.environ,
+            {
+                "FITORNOT_BROWSER_STORAGE_STATE": encoded_payload,
+                "FITORNOT_BROWSER_STORAGE_STATE_FILE": "",
+            },
+            clear=False,
+        ):
+            loaded_payload = module.load_browser_seed_storage_state()
+
+        self.assertTrue(encoded_payload.startswith("base64:"))
+        self.assertEqual(loaded_payload["cookies"][0]["name"], "mtop")
 
     def test_detect_platform_block_reason_identifies_jd_login_wall(self):
         module = importlib.import_module("domestic_browser")
@@ -504,6 +640,47 @@ class DomesticBrowserAdapterAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0][0]["name"], "sid")
+
+    async def test_apply_seed_storage_state_adds_cookies_and_init_script(self):
+        module = importlib.import_module("domestic_browser")
+        recorded_cookies: list[list[dict[str, object]]] = []
+        recorded_scripts: list[tuple[str, dict[str, object]]] = []
+
+        class FakeContext:
+            async def add_cookies(self, cookies):
+                recorded_cookies.append(cookies)
+
+            async def add_init_script(self, script, payload):
+                recorded_scripts.append((script, payload))
+
+        await module.apply_session_seed_storage_state(
+            FakeContext(),
+            {
+                "seed_storage_state": {
+                    "cookies": [
+                        {
+                            "name": "sid",
+                            "value": "cookie",
+                            "domain": ".taobao.com",
+                            "path": "/",
+                        }
+                    ],
+                    "origins": [
+                        {
+                            "origin": "https://www.xiaohongshu.com",
+                            "localStorage": [{"name": "web_session", "value": "trusted-session"}],
+                        }
+                    ],
+                }
+            },
+        )
+
+        self.assertEqual(recorded_cookies[0][0]["domain"], ".taobao.com")
+        self.assertIn("localStorage", recorded_scripts[0][0])
+        self.assertEqual(
+            recorded_scripts[0][1]["https://www.xiaohongshu.com"]["localStorage"][0]["name"],
+            "web_session",
+        )
 
 
 if __name__ == "__main__":

@@ -1602,6 +1602,7 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(result.fetch_status, "partial_failed")
         self.assertIn("FITORNOT_BROWSER_CDP_URL", result.blocked_sources[0]["reason"])
         self.assertIn("FITORNOT_BROWSER_COOKIES_FILE", result.blocked_sources[0]["reason"])
+        self.assertIn("FITORNOT_BROWSER_STORAGE_STATE", result.blocked_sources[0]["reason"])
         self.assertIn(".browser-profile", result.blocked_sources[0]["reason"])
         self.assertIn("start_fitornot_browser.ps1", result.blocked_sources[0]["reason"])
         self.assertIn("log in once", result.blocked_sources[1]["reason"])

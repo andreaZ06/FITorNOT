@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import gzip
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 DEFAULT_BROWSER_CHANNEL = ""
 DEFAULT_BROWSER_USER_AGENT = (
@@ -32,6 +33,14 @@ BROWSER_PROFILE_SYNC_ARTIFACTS = (
     "Default/IndexedDB",
     "Default/WebStorage",
     "Default/Storage",
+)
+SEED_STORAGE_ALLOWED_HOST_SUFFIXES = (
+    "jd.com",
+    "3.cn",
+    "taobao.com",
+    "tmall.com",
+    "xiaohongshu.com",
+    "xhs.cn",
 )
 
 
@@ -73,7 +82,13 @@ def _default_seed_cookie_path(profile_dir: Path | str | None) -> Path | None:
     return Path(profile_dir) / "seed-cookies.json"
 
 
-def _decode_seed_cookie_payload(raw_value: str) -> str:
+def _default_seed_storage_state_path(profile_dir: Path | str | None) -> Path | None:
+    if not profile_dir:
+        return None
+    return Path(profile_dir) / "seed-storage-state.json"
+
+
+def _decode_seed_json_payload(raw_value: str) -> str:
     normalized = raw_value.strip()
     if not normalized:
         return ""
@@ -81,7 +96,10 @@ def _decode_seed_cookie_payload(raw_value: str) -> str:
         payload = normalized.split(":", 1)[1].strip()
         if not payload:
             return ""
-        return base64.b64decode(payload).decode("utf-8")
+        decoded_bytes = base64.b64decode(payload)
+        if decoded_bytes[:2] == b"\x1f\x8b":
+            decoded_bytes = gzip.decompress(decoded_bytes)
+        return decoded_bytes.decode("utf-8")
     return normalized
 
 
@@ -118,7 +136,7 @@ def load_browser_seed_cookies(profile_dir: Path | str | None = None) -> list[dic
     if seed_cookie_path and seed_cookie_path.exists():
         payload_text = seed_cookie_path.read_text(encoding="utf-8").replace("\ufeff", "").strip()
     elif raw_payload:
-        payload_text = _decode_seed_cookie_payload(raw_payload)
+        payload_text = _decode_seed_json_payload(raw_payload)
 
     if not payload_text:
         return []
@@ -143,6 +161,153 @@ def load_browser_seed_cookies(profile_dir: Path | str | None = None) -> list[dic
     return normalized_cookies
 
 
+def _normalize_seed_storage_entries(entries: Any) -> list[dict[str, str]]:
+    normalized_entries: list[dict[str, str]] = []
+    if not isinstance(entries, list):
+        return normalized_entries
+
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        value = item.get("value")
+        if not name or value is None:
+            continue
+        normalized_entries.append({"name": name, "value": str(value)})
+    return normalized_entries
+
+
+def _normalize_seed_storage_origin(origin_record: Any) -> dict[str, Any] | None:
+    if not isinstance(origin_record, dict):
+        return None
+
+    origin = str(origin_record.get("origin", "")).strip()
+    if not origin.startswith("http"):
+        return None
+
+    local_storage = _normalize_seed_storage_entries(origin_record.get("localStorage"))
+    session_storage = _normalize_seed_storage_entries(origin_record.get("sessionStorage"))
+    if not local_storage and not session_storage:
+        return None
+
+    normalized: dict[str, Any] = {"origin": origin}
+    if local_storage:
+        normalized["localStorage"] = local_storage
+    if session_storage:
+        normalized["sessionStorage"] = session_storage
+    return normalized
+
+
+def load_browser_seed_storage_state(profile_dir: Path | str | None = None) -> dict[str, Any]:
+    storage_state_file = os.getenv("FITORNOT_BROWSER_STORAGE_STATE_FILE", "").strip()
+    raw_payload = os.getenv("FITORNOT_BROWSER_STORAGE_STATE", "").strip()
+    seed_storage_state_path = (
+        Path(storage_state_file) if storage_state_file else _default_seed_storage_state_path(profile_dir)
+    )
+
+    payload_text = ""
+    if seed_storage_state_path and seed_storage_state_path.exists():
+        payload_text = seed_storage_state_path.read_text(encoding="utf-8").replace("\ufeff", "").strip()
+    elif raw_payload:
+        payload_text = _decode_seed_json_payload(raw_payload)
+
+    if not payload_text:
+        return {"cookies": [], "origins": []}
+
+    try:
+        payload = json.loads(payload_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"cookies": [], "origins": []}
+
+    if isinstance(payload, list):
+        raw_cookies = payload
+        raw_origins: list[Any] = []
+    elif isinstance(payload, dict):
+        raw_cookies = payload.get("cookies", [])
+        raw_origins = payload.get("origins", [])
+    else:
+        raw_cookies = []
+        raw_origins = []
+
+    normalized_origins: list[dict[str, Any]] = []
+    for item in raw_origins:
+        normalized_origin = _normalize_seed_storage_origin(item)
+        if normalized_origin:
+            normalized_origins.append(normalized_origin)
+
+    return {
+        "cookies": [_cookie for _cookie in ( _normalize_seed_cookie(item) for item in raw_cookies ) if _cookie],
+        "origins": normalized_origins,
+    }
+
+
+def _host_matches_seed_storage_allowlist(hostname: str) -> bool:
+    normalized_host = hostname.strip().lower().lstrip(".")
+    if not normalized_host:
+        return False
+    return any(
+        normalized_host == suffix or normalized_host.endswith(f".{suffix}")
+        for suffix in SEED_STORAGE_ALLOWED_HOST_SUFFIXES
+    )
+
+
+def compact_seed_storage_state(payload: dict[str, Any]) -> dict[str, Any]:
+    compacted_cookies: list[dict[str, Any]] = []
+    seen_cookie_keys: set[str] = set()
+    for raw_cookie in payload.get("cookies", []):
+        normalized_cookie = _normalize_seed_cookie(raw_cookie)
+        if not normalized_cookie:
+            continue
+
+        candidate_host = ""
+        if normalized_cookie.get("domain"):
+            candidate_host = str(normalized_cookie["domain"])
+        elif normalized_cookie.get("url"):
+            candidate_host = urlparse(str(normalized_cookie["url"])).hostname or ""
+        if not _host_matches_seed_storage_allowlist(candidate_host):
+            continue
+
+        cookie_key = "|".join(
+            [
+                str(normalized_cookie.get("name", "")).lower(),
+                str(normalized_cookie.get("domain", "")).lower(),
+                str(normalized_cookie.get("path", "")),
+                str(normalized_cookie.get("url", "")),
+            ]
+        )
+        if cookie_key in seen_cookie_keys:
+            continue
+        seen_cookie_keys.add(cookie_key)
+        compacted_cookies.append(normalized_cookie)
+
+    compacted_origins: list[dict[str, Any]] = []
+    seen_origins: set[str] = set()
+    for raw_origin in payload.get("origins", []):
+        normalized_origin = _normalize_seed_storage_origin(raw_origin)
+        if not normalized_origin:
+            continue
+        origin_url = str(normalized_origin["origin"]).strip()
+        if not _host_matches_seed_storage_allowlist(urlparse(origin_url).hostname or ""):
+            continue
+        if origin_url in seen_origins:
+            continue
+        seen_origins.add(origin_url)
+        compacted_origins.append(normalized_origin)
+
+    return {
+        "cookies": compacted_cookies,
+        "origins": compacted_origins,
+    }
+
+
+def encode_seed_storage_state_payload(payload: dict[str, Any]) -> str:
+    compacted_payload = compact_seed_storage_state(payload)
+    encoded_bytes = gzip.compress(
+        json.dumps(compacted_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    return f"base64:{base64.b64encode(encoded_bytes).decode('ascii')}"
+
+
 def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[str, Any]:
     cdp_url = os.getenv("FITORNOT_BROWSER_CDP_URL", "").strip() or (_read_cdp_url_marker(profile_dir) or "")
     channel_raw = os.getenv("FITORNOT_BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL).strip()
@@ -153,6 +318,7 @@ def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[
         profile_source_root = Path(source_root)
     else:
         profile_source_root = _default_profile_source_root()
+    seed_storage_state = load_browser_seed_storage_state(profile_dir)
     return {
         "mode": "cdp" if cdp_url else "persistent",
         "cdp_url": cdp_url or None,
@@ -165,6 +331,7 @@ def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[
             bool(profile_source_root),
         ),
         "seed_cookies": load_browser_seed_cookies(profile_dir),
+        "seed_storage_state": seed_storage_state,
     }
 
 
@@ -276,6 +443,46 @@ async def apply_session_seed_cookies(context: Any, session_config: dict[str, Any
     cookies = session_config.get("seed_cookies") or []
     if cookies:
         await context.add_cookies(cookies)
+
+
+async def apply_session_seed_storage_state(context: Any, session_config: dict[str, Any]) -> None:
+    storage_state = session_config.get("seed_storage_state") or {}
+    cookies = storage_state.get("cookies") or []
+    if cookies:
+        await context.add_cookies(cookies)
+
+    origin_payload: dict[str, dict[str, list[dict[str, str]]]] = {}
+    for origin_record in storage_state.get("origins") or []:
+        origin = str(origin_record.get("origin", "")).strip()
+        if not origin:
+            continue
+        local_storage = origin_record.get("localStorage") or []
+        session_storage = origin_record.get("sessionStorage") or []
+        if not local_storage and not session_storage:
+            continue
+        origin_payload[origin] = {
+            "localStorage": local_storage,
+            "sessionStorage": session_storage,
+        }
+
+    if origin_payload:
+        await context.add_init_script(
+            """(originState) => {
+                try {
+                    const seed = originState?.[window.location.origin];
+                    if (!seed) return;
+                    for (const item of seed.localStorage || []) {
+                        window.localStorage.setItem(item.name, item.value);
+                    }
+                    for (const item of seed.sessionStorage || []) {
+                        window.sessionStorage.setItem(item.name, item.value);
+                    }
+                } catch (error) {
+                    console.debug('FITorNOT storage seed skipped', error);
+                }
+            }""",
+            origin_payload,
+        )
 
 
 def _strip_jsonp_wrapper(text: str) -> str:
@@ -722,6 +929,7 @@ class PlaywrightDomesticBrowserAdapter:
                         user_agent=session_config["user_agent"],
                         extra_http_headers=session_config["extra_http_headers"],
                     )
+                    await apply_session_seed_storage_state(context, session_config)
                     await apply_session_seed_cookies(context, session_config)
                     yield context
                 finally:
@@ -739,6 +947,7 @@ class PlaywrightDomesticBrowserAdapter:
                 ),
             )
             try:
+                await apply_session_seed_storage_state(context, session_config)
                 await apply_session_seed_cookies(context, session_config)
                 yield context
             finally:
