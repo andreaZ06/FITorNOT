@@ -32,12 +32,15 @@ class DeploymentArtifactsTest(unittest.TestCase):
         env_example_text = env_example.read_text(encoding="utf-8")
         railway_payload = json.loads(railway_config.read_text(encoding="utf-8"))
 
-        self.assertIn("uvicorn main:app", dockerfile_text)
-        self.assertIn("${PORT:-8000}", dockerfile_text)
+        self.assertIn("service_launcher.py", dockerfile_text)
+        self.assertIn("xvfb", dockerfile_text)
+        self.assertIn("websockify", dockerfile_text)
         self.assertIn(".browser-profile/", dockerignore_text)
         self.assertIn("DEEPSEEK_API_KEY", env_example_text)
         self.assertIn("BRIGHTDATA_API_KEY", env_example_text)
         self.assertIn("NEON_DATABASE_URL", env_example_text)
+        self.assertIn("FITORNOT_SERVICE_MODE", env_example_text)
+        self.assertIn("FITORNOT_BROWSER_CDP_URL", env_example_text)
         self.assertEqual("/health", railway_payload["deploy"]["healthcheckPath"])
 
 

@@ -181,6 +181,16 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn("消费场景适配器", module.SCENARIO_ADAPTER_SYSTEM_PROMPT)
         self.assertIn("FITorNOT", module.GENERATOR_SYSTEM_PROMPT)
 
+    def test_trusted_session_bootstrap_hint_prefers_browser_service_in_remote_runtime(self):
+        os.environ["RAILWAY_ENVIRONMENT"] = "production"
+        module = importlib.import_module("main")
+
+        hint = module._trusted_session_bootstrap_hint()
+
+        self.assertIn("FITORNOT_SERVICE_MODE=browser", hint)
+        self.assertIn("FITORNOT_BROWSER_CDP_URL", hint)
+        self.assertNotIn("start_fitornot_browser.ps1", hint)
+
     def test_local_intent_parser_detects_power_bank_from_chinese_input(self):
         module = importlib.import_module("main")
 

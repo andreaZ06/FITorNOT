@@ -73,7 +73,7 @@ Notes:
   plus a compressed `FITORNOT_BROWSER_STORAGE_STATE=base64:...` line that keeps
   only JD/Taobao/Xiaohongshu cookies and origin storage.
 - If browser automation is unavailable or blocked, the workflow degrades to the
-  existing Bright Data fallback without inventing comments.
+  existing fallback path without inventing comments.
 
 ## Python Usage
 
@@ -130,7 +130,7 @@ Required:
 DEEPSEEK_API_KEY=your-deepseek-key
 ```
 
-Recommended:
+Optional legacy fallback:
 
 ```bash
 BRIGHTDATA_API_KEY=your-brightdata-key
@@ -140,6 +140,7 @@ NEON_DATABASE_URL=postgresql://...
 Safe Railway defaults:
 
 ```bash
+FITORNOT_SERVICE_MODE=backend
 FITORNOT_ENABLE_BROWSER_AUTOMATION=0
 FITORNOT_BROWSER_HEADLESS=true
 FITORNOT_BROWSER_TIMEOUT_MS=45000
@@ -152,10 +153,17 @@ Notes:
   validated a browser-capable runtime.
 - Without browser automation, the API should degrade through its existing
   fallback paths instead of inventing evidence.
-- Once Railway can run Playwright stably, prefer one of these trusted-session
-  bootstrap paths:
-  - `FITORNOT_BROWSER_CDP_URL=https://...` for a long-lived remote Chrome/CDP
-    session
+- Once Railway can run Playwright stably, prefer a dedicated browser service:
+  - create a second Railway service from the same `review-pitfall-checker-v2`
+    root
+  - set `FITORNOT_SERVICE_MODE=browser`
+  - mount a persistent volume to `/app/.browser-profile`
+  - open the browser service public URL to access the noVNC page and log in
+    once
+  - point the API service at the browser service with
+    `FITORNOT_BROWSER_CDP_URL=http://fitornot-browser.railway.internal:9222`
+- If you cannot keep a live browser online, these bootstrap paths remain
+  available:
   - `FITORNOT_BROWSER_COOKIES_FILE=/app/.browser-profile/seed-cookies.json`
     for an uploaded cookies file on the service filesystem
   - `FITORNOT_BROWSER_COOKIES_JSON=base64:...` only when the cookie payload is
@@ -189,3 +197,40 @@ FITORNOT_API_BASE_URL=https://your-railway-domain.up.railway.app
 
 Do not point Vercel to `http://127.0.0.1:8000`. That address only works for
 local development and will fail in production.
+
+## Dedicated Browser Service
+
+The same Docker image now supports two service modes:
+
+- `FITORNOT_SERVICE_MODE=backend`: FastAPI API service
+- `FITORNOT_SERVICE_MODE=browser`: persistent Chromium + Xvfb + x11vnc +
+  noVNC + CDP service
+
+When the browser service starts, it exposes:
+
+- public `PORT`: noVNC login surface
+- internal `9222`: Chrome DevTools Protocol endpoint for
+  `FITORNOT_BROWSER_CDP_URL`
+
+Suggested Railway wiring:
+
+```bash
+# Browser service env
+FITORNOT_SERVICE_MODE=browser
+FITORNOT_BROWSER_PROFILE_DIR=/app/.browser-profile
+FITORNOT_BROWSER_CDP_PORT=9222
+FITORNOT_BROWSER_VNC_PORT=5900
+FITORNOT_BROWSER_START_URL=https://www.jd.com/
+
+# API service env
+FITORNOT_SERVICE_MODE=backend
+FITORNOT_BROWSER_CDP_URL=http://fitornot-browser.railway.internal:9222
+FITORNOT_ENABLE_BROWSER_AUTOMATION=0
+```
+
+After the browser service is live:
+
+1. Open its public Railway URL.
+2. Complete login and verification inside the noVNC browser window.
+3. Leave the browser service running.
+4. Re-run FITorNOT searches through the API service.

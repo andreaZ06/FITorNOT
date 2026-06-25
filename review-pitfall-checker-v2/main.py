@@ -1049,10 +1049,31 @@ def _browser_adapter_unavailable_error() -> RuntimeError:
     )
 
 
+def _is_remote_runtime() -> bool:
+    return any(
+        os.getenv(name, "").strip()
+        for name in (
+            "RAILWAY_ENVIRONMENT",
+            "RAILWAY_PROJECT_ID",
+            "K_SERVICE",
+            "RENDER",
+        )
+    )
+
+
 def _trusted_session_bootstrap_hint() -> str:
     adapter = get_domestic_browser_adapter()
     profile_dir = Path(getattr(adapter, "profile_dir", _browser_profile_dir()))
     launcher_script = Path(__file__).resolve().parent / "start_fitornot_browser.ps1"
+    if _is_remote_runtime():
+        return (
+            "Deploy a dedicated browser service with `FITORNOT_SERVICE_MODE=browser`, mount a persistent profile "
+            f"volume at `{profile_dir}`, log in once through its noVNC page, and point `FITORNOT_BROWSER_CDP_URL` "
+            "to that service's internal CDP endpoint (for example `http://fitornot-browser.railway.internal:9222`). "
+            "If you cannot keep a live browser online, you can still provide exported cookies with "
+            "`FITORNOT_BROWSER_COOKIES_FILE` / `FITORNOT_BROWSER_COOKIES_JSON`, or a compact storage state with "
+            "`FITORNOT_BROWSER_STORAGE_STATE_FILE` / `FITORNOT_BROWSER_STORAGE_STATE`."
+        )
     return (
         f"Run {launcher_script} -ProfileDir \"{profile_dir}\" to open the FITorNOT browser profile and log in once, "
         "or connect a trusted Chrome session via FITORNOT_BROWSER_CDP_URL, or provide exported cookies with "
