@@ -168,6 +168,10 @@ def build_websockify_command(config: BrowserServiceConfig) -> list[str]:
     ]
 
 
+def should_launch_websockify(config: BrowserServiceConfig) -> bool:
+    return config.public_port != config.cdp_port
+
+
 def _wait_for_tcp(host: str, port: int, timeout_seconds: float) -> None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
@@ -234,8 +238,10 @@ def run_browser_service(config: BrowserServiceConfig) -> int:
         processes.append(x11vnc_process)
         _wait_for_tcp("127.0.0.1", config.vnc_port, timeout_seconds=30)
 
-        websockify_process = _launch_process(build_websockify_command(config))
-        processes.append(websockify_process)
+        websockify_process: subprocess.Popen[str] | None = None
+        if should_launch_websockify(config):
+            websockify_process = _launch_process(build_websockify_command(config))
+            processes.append(websockify_process)
 
         while True:
             chromium_exit_code = chromium_process.poll()
@@ -244,9 +250,10 @@ def run_browser_service(config: BrowserServiceConfig) -> int:
             socat_exit_code = socat_process.poll()
             if socat_exit_code is not None:
                 return socat_exit_code
-            websockify_exit_code = websockify_process.poll()
-            if websockify_exit_code is not None:
-                return websockify_exit_code
+            if websockify_process is not None:
+                websockify_exit_code = websockify_process.poll()
+                if websockify_exit_code is not None:
+                    return websockify_exit_code
             time.sleep(1)
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
