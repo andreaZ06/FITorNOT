@@ -1,10 +1,12 @@
 import asyncio
+import builtins
 import importlib
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +43,19 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(other.category, "其他")
         with self.assertRaises(Exception):
             module.IntentSlots(category="手机", brand="", model="", urls=[])
+
+    def test_main_falls_back_to_loading_data_cleaning_from_local_file(self):
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "data_cleaning":
+                raise ModuleNotFoundError("No module named 'data_cleaning'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            module = importlib.import_module("main")
+
+        self.assertTrue(callable(module.clean_and_filter_data))
 
     def test_node_contracts_are_pydantic_models(self):
         module = importlib.import_module("main")
