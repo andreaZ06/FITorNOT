@@ -163,7 +163,7 @@ def build_websockify_command(config: BrowserServiceConfig) -> list[str]:
         "websockify",
         "--web",
         str(config.web_root),
-        str(config.public_port),
+        f"0.0.0.0:{config.public_port}",
         f"127.0.0.1:{config.vnc_port}",
     ]
 

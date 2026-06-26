@@ -113,6 +113,18 @@ class BrowserServiceTest(unittest.TestCase):
         self.assertIn("TCP-LISTEN:9223,fork,reuseaddr,bind=0.0.0.0", command)
         self.assertIn("TCP:127.0.0.1:9224", command)
 
+    def test_build_websockify_command_binds_public_novnc_listener_to_all_interfaces(self):
+        os.environ["PORT"] = "38080"
+        os.environ["FITORNOT_BROWSER_PUBLIC_PORT"] = "39090"
+        module = importlib.import_module("browser_service")
+        config = module.build_browser_service_config()
+
+        command = module.build_websockify_command(config)
+
+        self.assertEqual(command[0], "websockify")
+        self.assertIn("0.0.0.0:39090", command)
+        self.assertIn("127.0.0.1:5900", command)
+
     def test_should_launch_websockify_skips_when_public_port_matches_cdp_port(self):
         os.environ["PORT"] = "9223"
         module = importlib.import_module("browser_service")
