@@ -57,6 +57,12 @@ class MainDecisionApiTest(unittest.TestCase):
 
         self.assertTrue(callable(module.clean_and_filter_data))
 
+    def test_main_prefers_deployment_safe_cleaning_module_name_for_local_fallback(self):
+        module = importlib.import_module("main")
+
+        self.assertEqual(module.LOCAL_CLEANING_MODULE_FILES[0], "fitornot_cleaning.py")
+        self.assertEqual(module.LOCAL_CLEANING_MODULE_IMPORTS[0], "fitornot_cleaning")
+
     def test_node_contracts_are_pydantic_models(self):
         module = importlib.import_module("main")
 

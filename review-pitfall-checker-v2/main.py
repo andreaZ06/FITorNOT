@@ -25,16 +25,34 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-try:
-    from data_cleaning import clean_and_filter_data as _base_clean_and_filter_data
-except ModuleNotFoundError:
-    _data_cleaning_path = Path(__file__).with_name("data_cleaning.py")
-    _data_cleaning_spec = importlib.util.spec_from_file_location("fitornot_data_cleaning", _data_cleaning_path)
-    if _data_cleaning_spec is None or _data_cleaning_spec.loader is None:  # pragma: no cover - defensive import guard
-        raise
-    _data_cleaning_module = importlib.util.module_from_spec(_data_cleaning_spec)
-    _data_cleaning_spec.loader.exec_module(_data_cleaning_module)
-    _base_clean_and_filter_data = _data_cleaning_module.clean_and_filter_data
+LOCAL_CLEANING_MODULE_IMPORTS = ("fitornot_cleaning", "data_cleaning")
+LOCAL_CLEANING_MODULE_FILES = ("fitornot_cleaning.py", "data_cleaning.py")
+
+
+def _load_clean_and_filter_data() -> Callable[[dict, str, str], dict]:
+    for module_name in LOCAL_CLEANING_MODULE_IMPORTS:
+        with contextlib.suppress(ModuleNotFoundError):
+            module = __import__(module_name, fromlist=["clean_and_filter_data"])
+            return module.clean_and_filter_data
+
+    for file_name in LOCAL_CLEANING_MODULE_FILES:
+        module_path = Path(__file__).with_name(file_name)
+        if not module_path.exists():
+            continue
+        module_spec = importlib.util.spec_from_file_location(f"fitornot_{module_path.stem}", module_path)
+        if module_spec is None or module_spec.loader is None:  # pragma: no cover - defensive import guard
+            continue
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        return module.clean_and_filter_data
+
+    raise ModuleNotFoundError(
+        "No local cleaning module found. Expected one of: "
+        + ", ".join(LOCAL_CLEANING_MODULE_FILES)
+    )
+
+
+_base_clean_and_filter_data = _load_clean_and_filter_data()
 
 try:
     from langchain_openai import ChatOpenAI as _ChatOpenAI

@@ -13,6 +13,7 @@ class DeploymentArtifactsTest(unittest.TestCase):
         env_example = self.project_root / ".env.example"
         railway_config = self.project_root / "railway.json"
         browser_railway_config = self.project_root / "railway.browser.json"
+        deployment_safe_cleaning_module = self.project_root / "fitornot_cleaning.py"
 
         self.assertTrue(dockerfile.exists(), "Dockerfile should exist for Railway deployment.")
         self.assertTrue(
@@ -30,6 +31,10 @@ class DeploymentArtifactsTest(unittest.TestCase):
         self.assertTrue(
             browser_railway_config.exists(),
             "railway.browser.json should exist for the dedicated browser worker.",
+        )
+        self.assertTrue(
+            deployment_safe_cleaning_module.exists(),
+            "A deployment-safe cleaning module should exist outside the root data* ignore pattern.",
         )
 
         dockerfile_text = dockerfile.read_text(encoding="utf-8")
