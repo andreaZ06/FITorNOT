@@ -33,12 +33,24 @@ class BrowserServiceTest(unittest.TestCase):
         config = module.build_browser_service_config()
 
         self.assertEqual(config.public_port, 38080)
-        self.assertEqual(config.cdp_port, 9222)
-        self.assertEqual(config.chromium_cdp_port, 9223)
+        self.assertEqual(config.cdp_port, 9223)
+        self.assertEqual(config.chromium_cdp_port, 9224)
         self.assertEqual(config.vnc_port, 5900)
         self.assertEqual(config.display, ":99")
         self.assertTrue(str(config.profile_dir).endswith(".browser-profile"))
         self.assertEqual(config.start_url, "https://www.jd.com/")
+
+    def test_build_browser_service_config_keeps_cdp_ports_distinct_from_railway_public_port(self):
+        os.environ["PORT"] = "9222"
+        module = importlib.import_module("browser_service")
+
+        config = module.build_browser_service_config()
+
+        self.assertEqual(config.public_port, 9222)
+        self.assertEqual(config.cdp_port, 9223)
+        self.assertEqual(config.chromium_cdp_port, 9224)
+        self.assertNotEqual(config.public_port, config.cdp_port)
+        self.assertNotEqual(config.cdp_port, config.chromium_cdp_port)
 
     def test_build_browser_service_config_honors_explicit_env_overrides(self):
         os.environ["PORT"] = "38080"
@@ -84,7 +96,7 @@ class BrowserServiceTest(unittest.TestCase):
 
         self.assertEqual(command[0], "/ms-playwright/chromium/chrome")
         self.assertIn("--remote-debugging-address=127.0.0.1", command)
-        self.assertIn("--remote-debugging-port=9223", command)
+        self.assertIn("--remote-debugging-port=9224", command)
         self.assertIn(f"--user-data-dir={config.profile_dir}", command)
         self.assertIn("--no-sandbox", command)
         self.assertIn("--disable-setuid-sandbox", command)
@@ -98,8 +110,8 @@ class BrowserServiceTest(unittest.TestCase):
         command = module.build_socat_command(config)
 
         self.assertEqual(command[0], "socat")
-        self.assertIn("TCP-LISTEN:9222,fork,reuseaddr,bind=0.0.0.0", command)
-        self.assertIn("TCP:127.0.0.1:9223", command)
+        self.assertIn("TCP-LISTEN:9223,fork,reuseaddr,bind=0.0.0.0", command)
+        self.assertIn("TCP:127.0.0.1:9224", command)
 
     def test_service_launcher_uses_browser_mode_command(self):
         os.environ["FITORNOT_SERVICE_MODE"] = "browser"
