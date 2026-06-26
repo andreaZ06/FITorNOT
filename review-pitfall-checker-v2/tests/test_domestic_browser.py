@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import gzip
 import json
@@ -9,6 +10,10 @@ from base64 import b64encode
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class DomesticBrowserHelpersTest(unittest.TestCase):
@@ -67,6 +72,23 @@ class DomesticBrowserHelpersTest(unittest.TestCase):
 
         self.assertEqual(config["mode"], "cdp")
         self.assertEqual(config["cdp_url"], "http://127.0.0.1:9222")
+
+    def test_resolve_cdp_connection_target_rewrites_remote_websocket_url_for_proxy_host(self):
+        module = importlib.import_module("domestic_browser")
+
+        async def fake_fetch(_url: str, headers: dict[str, str]) -> dict[str, str]:
+            self.assertEqual(headers, {"Host": "localhost"})
+            return {"webSocketDebuggerUrl": "ws://localhost/devtools/browser/test-browser-id"}
+
+        endpoint_url, headers = asyncio.run(
+            module.resolve_cdp_connection_target(
+                "http://reseau.proxy.rlwy.net:41616",
+                version_fetcher=fake_fetch,
+            )
+        )
+
+        self.assertEqual(endpoint_url, "ws://reseau.proxy.rlwy.net:41616/devtools/browser/test-browser-id")
+        self.assertEqual(headers, {"Host": "localhost"})
 
     def test_build_browser_session_config_defaults_to_bundled_chromium_without_browser_channel(self):
         module = importlib.import_module("domestic_browser")

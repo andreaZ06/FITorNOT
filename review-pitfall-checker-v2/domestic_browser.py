@@ -10,9 +10,10 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urlparse, urlunparse
 
 DEFAULT_BROWSER_CHANNEL = ""
 DEFAULT_BROWSER_USER_AGENT = (
@@ -95,6 +96,7 @@ SEED_STORAGE_ALLOWED_PREFIXES_BY_HOST_SUFFIX: dict[str, tuple[str, ...]] = {
     "3.cn": ("__we_m_", "WQ_"),
 }
 SEED_STORAGE_MAX_VALUE_CHARS = 8192
+LOCAL_CDP_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -435,6 +437,62 @@ def build_browser_session_config(profile_dir: Path | str | None = None) -> dict[
         "seed_cookies": load_browser_seed_cookies(profile_dir),
         "seed_storage_state": seed_storage_state,
     }
+
+
+def _requires_remote_cdp_host_override(cdp_url: str) -> bool:
+    parsed = urlparse(cdp_url)
+    hostname = (parsed.hostname or "").strip().lower()
+    return bool(hostname) and hostname not in LOCAL_CDP_HOSTS
+
+
+def _remote_cdp_headers(cdp_url: str) -> dict[str, str] | None:
+    if _requires_remote_cdp_host_override(cdp_url):
+        return {"Host": "localhost"}
+    return None
+
+
+async def _fetch_cdp_version_payload(version_url: str, headers: dict[str, str]) -> dict[str, Any]:
+    def _load_payload() -> dict[str, Any]:
+        request = urllib.request.Request(version_url, headers=headers)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    return await asyncio.to_thread(_load_payload)
+
+
+def _rewrite_remote_cdp_websocket_url(public_cdp_url: str, websocket_url: str) -> str:
+    public_parts = urlparse(public_cdp_url)
+    websocket_parts = urlparse(websocket_url)
+    target_scheme = "wss" if public_parts.scheme == "https" else "ws"
+    return urlunparse(
+        (
+            target_scheme,
+            public_parts.netloc,
+            websocket_parts.path,
+            websocket_parts.params,
+            websocket_parts.query,
+            websocket_parts.fragment,
+        )
+    )
+
+
+async def resolve_cdp_connection_target(
+    cdp_url: str,
+    version_fetcher: Any | None = None,
+) -> tuple[str, dict[str, str] | None]:
+    headers = _remote_cdp_headers(cdp_url)
+    parsed = urlparse(cdp_url)
+    if parsed.scheme in {"ws", "wss"} or not headers:
+        return cdp_url, headers
+
+    fetcher = version_fetcher or _fetch_cdp_version_payload
+    version_url = f"{cdp_url.rstrip('/')}/json/version"
+    version_payload = await fetcher(version_url, headers)
+    websocket_url = str(version_payload.get("webSocketDebuggerUrl", "")).strip()
+    if not websocket_url:
+        raise RuntimeError("Remote CDP version payload did not include webSocketDebuggerUrl.")
+
+    return _rewrite_remote_cdp_websocket_url(cdp_url, websocket_url), headers
 
 
 def build_persistent_launch_options(
@@ -1024,7 +1082,11 @@ class PlaywrightDomesticBrowserAdapter:
         session_config = build_browser_session_config(self.profile_dir)
         async with async_playwright() as playwright:
             if session_config["mode"] == "cdp":
-                browser = await playwright.chromium.connect_over_cdp(session_config["cdp_url"])
+                cdp_endpoint_url, cdp_headers = await resolve_cdp_connection_target(session_config["cdp_url"])
+                browser = await playwright.chromium.connect_over_cdp(
+                    cdp_endpoint_url,
+                    headers=cdp_headers,
+                )
                 try:
                     context = browser.contexts[0] if browser.contexts else await browser.new_context(
                         locale="zh-CN",
