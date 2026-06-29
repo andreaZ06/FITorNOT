@@ -1,7 +1,7 @@
 import { envConfigs } from '@/config';
 import { respData, respErr } from '@/shared/lib/resp';
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 type FitOrNotDecisionRequest = {
   userRawInput?: string;

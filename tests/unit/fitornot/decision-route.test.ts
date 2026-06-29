@@ -13,7 +13,7 @@ describe('POST /api/fitornot/decision', () => {
   });
 
   it('exports a longer max duration for upstream decision generation', () => {
-    expect(maxDuration).toBe(60);
+    expect(maxDuration).toBe(300);
   });
 
   it('forwards the decision request to the python backend', async () => {
