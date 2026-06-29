@@ -19,12 +19,18 @@ class MainDecisionApiTest(unittest.TestCase):
         os.environ.pop("FITORNOT_FORCE_COMPAT_LLM", None)
         os.environ.pop("FITORNOT_ENABLE_BROWSER_AUTOMATION", None)
         os.environ.pop("FITORNOT_BROWSER_CDP_URL", None)
+        os.environ.pop("FITORNOT_ECOMMERCE_FETCH_TIMEOUT_MS", None)
+        os.environ.pop("FITORNOT_XHS_FETCH_TIMEOUT_MS", None)
+        os.environ.pop("FITORNOT_XHS_FETCH_LIMIT", None)
         self._browser_profile_dir = tempfile.TemporaryDirectory()
         os.environ["FITORNOT_BROWSER_PROFILE_DIR"] = self._browser_profile_dir.name
         sys.modules.pop("main", None)
 
     def tearDown(self):
         os.environ.pop("FITORNOT_BROWSER_PROFILE_DIR", None)
+        os.environ.pop("FITORNOT_ECOMMERCE_FETCH_TIMEOUT_MS", None)
+        os.environ.pop("FITORNOT_XHS_FETCH_TIMEOUT_MS", None)
+        os.environ.pop("FITORNOT_XHS_FETCH_LIMIT", None)
         self._browser_profile_dir.cleanup()
         sys.modules.pop("main", None)
 
@@ -857,6 +863,144 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertEqual(result.fetch_status, "partial_failed")
         self.assertTrue(result.blocked_sources)
         self.assertEqual(result.blocked_sources[0]["source"], "domestic_ecommerce")
+
+    def test_domestic_recall_fetch_times_out_slow_ecommerce_platforms_and_returns_partial_failure(self):
+        module = importlib.import_module("main")
+        os.environ["FITORNOT_ECOMMERCE_FETCH_TIMEOUT_MS"] = "10"
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def slow_platform_fetch(query, category, platform, limit):
+            self.assertEqual(query, retrieval_plan.ecommerce_query)
+            self.assertEqual(category, module.SUPPORTED_CATEGORIES[0])
+            self.assertEqual(limit, 20)
+            self.assertIn(platform, {"jd", "taobao"})
+            await asyncio.sleep(0.05)
+            return []
+
+        async def fake_xhs(queries, limit):
+            self.assertTrue(queries)
+            self.assertEqual(limit, 10)
+            return []
+
+        module.fetch_ecommerce_candidates_for_platform = slow_platform_fetch
+        module.fetch_xiaohongshu_feedback = fake_xhs
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="鎴戞兂涔癆nker 10000姣畨鐨勫厖鐢靛疂浣嗘槸鎴戜笉鐭ラ亾瀹冭兘涓嶈兘涓婇鏈哄憖",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.fetch_status, "partial_failed")
+        self.assertTrue(result.blocked_sources)
+        self.assertIn("timed out", result.blocked_sources[0]["reason"])
+
+    def test_domestic_recall_fetch_times_out_slow_xhs_fetch_and_keeps_ecommerce_results(self):
+        module = importlib.import_module("main")
+        os.environ["FITORNOT_XHS_FETCH_TIMEOUT_MS"] = "10"
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_platform_fetch(query, category, platform, limit):
+            self.assertEqual(query, retrieval_plan.ecommerce_query)
+            self.assertEqual(category, module.SUPPORTED_CATEGORIES[0])
+            self.assertEqual(limit, 20)
+            return [
+                {
+                    "title": f"Anker 10000mAh {platform}",
+                    "price": "149",
+                    "shop_name": "Anker閺冩鍩屾惔?",
+                    "url": f"https://example.com/{platform}",
+                    "platform": platform,
+                }
+            ]
+
+        async def slow_xhs(queries, limit):
+            self.assertTrue(queries)
+            self.assertEqual(limit, 10)
+            await asyncio.sleep(0.05)
+            return []
+
+        module.fetch_ecommerce_candidates_for_platform = fake_platform_fetch
+        module.fetch_xiaohongshu_feedback = slow_xhs
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="閹存垶鍏傛稊鐧唍ker 10000濮ｎ偄鐣ㄩ惃鍕帠閻㈤潧鐤傛担鍡樻Ц閹存垳绗夐惌銉╀壕鐎瑰啳鍏樻稉宥堝厴娑撳﹪顥ｉ張鍝勬問",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertEqual(result.fetch_status, "partial_failed")
+        self.assertTrue(result.ecommerce_candidates)
+        self.assertEqual(result.blocked_sources[-1]["source"], "xiaohongshu")
+        self.assertIn("timed out", result.blocked_sources[-1]["reason"])
+
+    def test_domestic_recall_fetch_honors_configured_xhs_limit_override(self):
+        module = importlib.import_module("main")
+        os.environ["FITORNOT_XHS_FETCH_LIMIT"] = "1"
+        slots = module.IntentSlots(
+            category=module.SUPPORTED_CATEGORIES[0],
+            brand="Anker",
+            model="10000",
+            urls=[],
+        )
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+
+        async def fake_platform_fetch(query, category, platform, limit):
+            self.assertEqual(limit, 20)
+            return [
+                {
+                    "title": "Anker 10000mAh Nano",
+                    "price": "149",
+                    "shop_name": "Anker鏃楄埌搴?",
+                    "url": "https://item.jd.com/1.html",
+                    "platform": platform,
+                }
+            ]
+
+        async def fake_xhs(queries, limit):
+            self.assertEqual(limit, 1)
+            return [{"query": queries[0], "notes": [], "comments": []}]
+
+        module.fetch_ecommerce_candidates_for_platform = fake_platform_fetch
+        module.fetch_xiaohongshu_feedback = fake_xhs
+
+        result = asyncio.run(
+            module.domestic_recall_fetch(
+                module.DomesticRecallInput(
+                    user_raw_input="鎴戞兂涔癆nker 10000姣畨鐨勫厖鐢靛疂浣嗘槸鎴戜笉鐭ラ亾瀹冭兘涓嶈兘涓婇鏈哄憖",
+                    slots=slots,
+                    retrieval_plan=retrieval_plan,
+                    use_mock=False,
+                )
+            )
+        )
+
+        self.assertTrue(result.xiaohongshu_hits)
+        self.assertEqual(len(result.generated_xhs_queries), 1)
+        self.assertIn("Anker", result.generated_xhs_queries[0])
+        self.assertIn("10000", result.generated_xhs_queries[0])
 
     def test_fetch_ecommerce_candidates_uses_registered_browser_adapter(self):
         module = importlib.import_module("main")

@@ -93,6 +93,9 @@ DEFAULT_ALLOWED_ORIGINS = (
     "https://www.fitornot.site",
 )
 SUPPORTED_CATEGORIES = ("充电宝", "面膜", "狗粮", "其他")
+DEFAULT_ECOMMERCE_FETCH_TIMEOUT_MS = 45_000
+DEFAULT_XHS_FETCH_TIMEOUT_MS = 90_000
+DEFAULT_XHS_FETCH_LIMIT = 10
 URL_PATTERN = re.compile(r"https?://[^\s,，]+", re.IGNORECASE)
 
 
@@ -1119,6 +1122,33 @@ def _augment_browser_block_reason(reason: str) -> str:
     return reason
 
 
+def _env_positive_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    with contextlib.suppress(ValueError):
+        parsed = int(raw_value)
+        if parsed > 0:
+            return parsed
+    return default
+
+
+def ecommerce_fetch_timeout_seconds() -> float:
+    return _env_positive_int("FITORNOT_ECOMMERCE_FETCH_TIMEOUT_MS", DEFAULT_ECOMMERCE_FETCH_TIMEOUT_MS) / 1000.0
+
+
+def xhs_fetch_timeout_seconds() -> float:
+    return _env_positive_int("FITORNOT_XHS_FETCH_TIMEOUT_MS", DEFAULT_XHS_FETCH_TIMEOUT_MS) / 1000.0
+
+
+def xhs_fetch_limit() -> int:
+    return _env_positive_int("FITORNOT_XHS_FETCH_LIMIT", DEFAULT_XHS_FETCH_LIMIT)
+
+
+def _format_platform_timeout_reason(platform: str, timeout_seconds: float) -> str:
+    return f"{platform}: timed out after {timeout_seconds:.2f}s while waiting for browser results"
+
+
 async def fetch_ecommerce_candidates(query: str, category: str, limit: int = 20) -> list[dict[str, Any]]:
     adapter = get_domestic_browser_adapter()
     if adapter is None:
@@ -1500,18 +1530,24 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
     raw_candidates: list[dict[str, Any]] = []
     platform_failures: list[str] = []
     empty_platforms: list[str] = []
+    ecommerce_timeout_seconds = ecommerce_fetch_timeout_seconds()
     for platform in ("jd", "taobao"):
         try:
-            platform_candidates = await fetch_ecommerce_candidates_for_platform(
-                payload.retrieval_plan.ecommerce_query,
-                payload.slots.category,
-                platform,
-                limit=20,
+            platform_candidates = await asyncio.wait_for(
+                fetch_ecommerce_candidates_for_platform(
+                    payload.retrieval_plan.ecommerce_query,
+                    payload.slots.category,
+                    platform,
+                    limit=20,
+                ),
+                timeout=ecommerce_timeout_seconds,
             )
             if platform_candidates:
                 raw_candidates.extend(platform_candidates)
             else:
                 empty_platforms.append(platform)
+        except asyncio.TimeoutError:
+            platform_failures.append(_format_platform_timeout_reason(platform, ecommerce_timeout_seconds))
         except Exception as exc:  # noqa: BLE001
             platform_failures.append(f"{platform}: {_augment_browser_block_reason(str(exc))}")
 
@@ -1539,10 +1575,20 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
     if not generated_xhs_queries:
         generated_xhs_queries = list(payload.retrieval_plan.xiaohongshu_queries)
 
+    configured_xhs_limit = xhs_fetch_limit()
+    xhs_timeout_seconds = xhs_fetch_timeout_seconds()
     try:
-        xiaohongshu_hits = await fetch_xiaohongshu_feedback(generated_xhs_queries, limit=10)
+        xiaohongshu_hits = await asyncio.wait_for(
+            fetch_xiaohongshu_feedback(generated_xhs_queries, limit=configured_xhs_limit),
+            timeout=xhs_timeout_seconds,
+        )
         if not xiaohongshu_hits:
             blocked_sources.append({"source": "xiaohongshu", "reason": "no browser results returned"})
+    except asyncio.TimeoutError:
+        xiaohongshu_hits = []
+        blocked_sources.append(
+            {"source": "xiaohongshu", "reason": _format_platform_timeout_reason("xiaohongshu", xhs_timeout_seconds)}
+        )
     except Exception as exc:  # noqa: BLE001
         xiaohongshu_hits = []
         blocked_sources.append({"source": "xiaohongshu", "reason": _augment_browser_block_reason(str(exc))})
