@@ -1828,6 +1828,51 @@ class MainDecisionApiTest(unittest.TestCase):
         self.assertIn("jd", result.blocked_sources[0]["reason"].lower())
         self.assertTrue(all(item["platform"] == "taobao" for item in result.ecommerce_candidates))
 
+    def test_domestic_recall_fetch_starts_ecommerce_platforms_in_parallel(self):
+        module = importlib.import_module("main")
+        slots = module.IntentSlots(category=module.SUPPORTED_CATEGORIES[0], brand="Anker", model="10000", urls=[])
+        retrieval_plan = module.build_local_retrieval_plan(slots)
+        started_platforms: list[str] = []
+        both_started = asyncio.Event()
+        release_fetches = asyncio.Event()
+
+        async def fake_fetch_for_platform(query, category, platform, limit):
+            self.assertEqual(query, retrieval_plan.ecommerce_query)
+            self.assertEqual(category, module.SUPPORTED_CATEGORIES[0])
+            self.assertEqual(limit, 20)
+            started_platforms.append(platform)
+            if len(started_platforms) == 2:
+                both_started.set()
+            await release_fetches.wait()
+            return []
+
+        async def fake_xhs(_queries, limit):
+            self.assertEqual(limit, 10)
+            return []
+
+        module.fetch_ecommerce_candidates_for_platform = fake_fetch_for_platform
+        module.fetch_xiaohongshu_feedback = fake_xhs
+
+        async def exercise():
+            task = asyncio.create_task(
+                module.domestic_recall_fetch(
+                    module.DomesticRecallInput(
+                        user_raw_input="我想买Anker 10000毫安的充电宝但是我不知道它能不能上飞机呀",
+                        slots=slots,
+                        retrieval_plan=retrieval_plan,
+                        use_mock=False,
+                    )
+                )
+            )
+            await asyncio.wait_for(both_started.wait(), timeout=0.05)
+            release_fetches.set()
+            return await task
+
+        result = asyncio.run(exercise())
+
+        self.assertCountEqual(started_platforms, ["jd", "taobao"])
+        self.assertEqual(result.fetch_status, "partial_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

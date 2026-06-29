@@ -1500,6 +1500,44 @@ def _build_domestic_fetch_output(
     )
 
 
+async def _fetch_ecommerce_platform_result(
+    payload: DomesticRecallInput,
+    platform: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    try:
+        platform_candidates = await asyncio.wait_for(
+            fetch_ecommerce_candidates_for_platform(
+                payload.retrieval_plan.ecommerce_query,
+                payload.slots.category,
+                platform,
+                limit=20,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "platform": platform,
+            "candidates": [],
+            "failure": _format_platform_timeout_reason(platform, timeout_seconds),
+            "empty": False,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "platform": platform,
+            "candidates": [],
+            "failure": f"{platform}: {_augment_browser_block_reason(str(exc))}",
+            "empty": False,
+        }
+
+    return {
+        "platform": platform,
+        "candidates": list(platform_candidates),
+        "failure": None,
+        "empty": not bool(platform_candidates),
+    }
+
+
 async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallOutput:
     if payload.use_mock:
         mock_candidates = [
@@ -1531,25 +1569,21 @@ async def domestic_recall_fetch(payload: DomesticRecallInput) -> DomesticRecallO
     platform_failures: list[str] = []
     empty_platforms: list[str] = []
     ecommerce_timeout_seconds = ecommerce_fetch_timeout_seconds()
-    for platform in ("jd", "taobao"):
-        try:
-            platform_candidates = await asyncio.wait_for(
-                fetch_ecommerce_candidates_for_platform(
-                    payload.retrieval_plan.ecommerce_query,
-                    payload.slots.category,
-                    platform,
-                    limit=20,
-                ),
-                timeout=ecommerce_timeout_seconds,
-            )
-            if platform_candidates:
-                raw_candidates.extend(platform_candidates)
-            else:
-                empty_platforms.append(platform)
-        except asyncio.TimeoutError:
-            platform_failures.append(_format_platform_timeout_reason(platform, ecommerce_timeout_seconds))
-        except Exception as exc:  # noqa: BLE001
-            platform_failures.append(f"{platform}: {_augment_browser_block_reason(str(exc))}")
+    platform_results = await asyncio.gather(
+        *[
+            _fetch_ecommerce_platform_result(payload, platform, ecommerce_timeout_seconds)
+            for platform in ("jd", "taobao")
+        ]
+    )
+    for platform_result in platform_results:
+        if platform_result["candidates"]:
+            raw_candidates.extend(platform_result["candidates"])
+        elif platform_result["empty"]:
+            empty_platforms.append(platform_result["platform"])
+
+        failure_reason = platform_result["failure"]
+        if failure_reason:
+            platform_failures.append(failure_reason)
 
     ecommerce_candidates = normalize_ecommerce_candidates(
         raw_candidates,
